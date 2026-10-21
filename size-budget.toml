@@ -1,0 +1,19 @@
+# Budgets for build artifacts and the shipped binary.
+# Enforced by scripts/size-report.sh --check in CI. See docs/build.md.
+#
+# Values are MiB. These are placeholders with headroom — calibrate them in M1
+# once the workspace builds for real, then tighten in M6 before v0.1.
+
+[target]
+# Whole `target/` directory after a normal dev + test + release build.
+total_mb = 4096
+# `target/debug` (our crates + deps + test binaries).
+dev_mb = 2500
+# `target/release`.
+release_mb = 900
+# `target/debug/incremental` — the first thing to prune, and never cached in CI.
+incremental_mb = 1200
+
+[binaries]
+# Stripped `target/release/mta` (debug info stripped, symbols kept).
+release_mta_mb = 30

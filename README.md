@@ -1,0 +1,64 @@
+# multi-machine-ai-orchestrator (`mta`)
+
+Terminal-first AI agent orchestrator: a Kanban board where day-to-day employee tasks are assigned to
+configurable agents, executed against any OpenAI-compatible provider, and reviewed by a human.
+
+**Status:** planning stage — no code yet. The full implementation plan is in
+**[docs/PLAN.md](docs/PLAN.md)**.
+
+## Documentation
+
+- [Documentation index](docs/README.md) — conventions, planned docs
+- [Implementation plan](docs/PLAN.md) — product spec, architecture, schema, milestones, risks
+- [Event-sourcing contract](docs/events.md) — events, commands, effects, deadlines, projections
+- [Provider compatibility](docs/providers.md) — tested endpoints, quirks, test procedure
+- [Sub-agents & skills](docs/agents.md) — reuse `.opencode/agents/*.md` and `.agents/` agents as
+  delegation targets, and attach `.agents/skills/*/SKILL.md` as context (no OpenCode runtime required)
+- [Build hygiene](docs/build.md) — bounded `target/`, profiles, size budgets, prune commands
+- [Architecture decision records](docs/adr/) — [0001 workspace](docs/adr/0001-workspace.md),
+  [0002 version pinning](docs/adr/0002-version-pinning.md),
+  [0003 engine owns store](docs/adr/0003-engine-owns-store.md),
+  [0004 Jev decision provider](docs/adr/0004-jev-decision-provider.md),
+  [0005 build size budgets](docs/adr/0005-build-size-budgets.md),
+  [0006 OpenCode sub-agents](docs/adr/0006-opencode-subagents.md),
+  [0007 context compaction](docs/adr/0007-context-compaction.md),
+  [0008 mouse hit map](docs/adr/0008-mouse-hit-map.md),
+  [0009 event-sourced core](docs/adr/0009-event-sourced-core.md),
+  [0010 agent and skill discovery](docs/adr/0010-agent-and-skill-discovery.md)
+
+## Intended shape
+
+```
+mta                     # launch the Kanban TUI (embeds the engine)
+mta run <task-id>       # headless single run
+mta run --scheduler     # cron-driven daily tasks, no TUI
+mta digest              # standup summary
+mta doctor              # config, DB, and provider probe
+```
+
+Rust workspace: `domain` · `store` · `provider` · `engine` · `tui` · `cli`. SQLite holds an
+**append-only event log that is the source of truth**: every value the app shows is a projection
+rebuilt from that log, every change is a validated command, and every side effect (HTTP, files,
+subprocesses, timers) subscribes to events and reports back as a command — so there is no polling
+loop, no sweep, and "why is this card like this?" is answered by an event. ratatui/crossterm for the
+UI, tokio for runtime, a thin OpenAI chat-completions wire layer for chat providers, and a separate
+**System One (Jev)** decision wire for typed `noul`/`choice`/`score` questions. When launched in a
+project that defines OpenCode agents (`.opencode/agents/*.md`) or the tool-neutral `.agents/`
+convention, those definitions become sub-agent targets: the assigned agent can `delegate` part of a
+task as a child run with its own transcript and budget, while OpenCode itself is not required.
+`.agents/skills/*/SKILL.md` entries are discovered alongside them as a **separate kind** — listed
+with provenance and trust, attachable to a run as extra context, and never offered as the agent that
+executes a run, because a skill declares no model, permissions, or tools. A skill directory is a
+black box except its `SKILL.md`: its `references/` corpus is never scanned or attached. Every run fits
+its model's context window on its own:
+context is estimated per request and compaction happens automatically before the limit. The TUI is
+fully keyboard-driven, with mouse click, wheel, and scrollbar drag mapping onto exactly the same
+actions — no mouse-only capability, and capture is restored if the process crashes. The status
+line carries live machine health (CPU, RAM, disk), with `S` for full detail — deliberately outside
+the event log, because a snapshot of free memory is not reproducible and has no business in an
+auditable log. Multi-machine execution (daemon + workers) is deliberately deferred to v0.2;
+replicating the event log is the intended protocol, and the crate boundaries are designed for it.
+
+## Next step
+
+Milestone M0 (bootstrap) per [PLAN.md §5](docs/PLAN.md#5-milestones).

@@ -1,0 +1,25 @@
+# Rust build artifacts — never commit, always prunable (docs/build.md)
+/target/
+target-*/
+
+# Per-tool target dirs we deliberately keep out of the default target
+/target-cov/
+/target-dist/
+
+# Installed skill bodies (.agents/skills/**). These are third-party content fetched by a skills
+# installer and pinned by `skills-lock.json` (source + computedHash); commit the lock, not the
+# copies. `mta` reads them from disk when present — docs/agents.md §2.
+/.agents/
+
+# Build/test leftovers
+**/*.rs.bk
+*.profraw
+*.profdata
+perf.data*
+*.sccache
+
+# Editors / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
