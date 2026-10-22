@@ -19,6 +19,7 @@ consequences, with alternatives considered.
 | [0010](0010-agent-and-skill-discovery.md) | Discover agents and skills from multiple roots, with skills as a separate kind | Proposed (M5.5) |
 | [0011](0011-observability-and-diagnostics.md) | Structured diagnostics with `tracing`, kept separate from the event log | Proposed (M0) |
 | [0012](0012-task-estimation.md) | Event-sourced auto-estimation: heuristic, calibration, optional Jev refinement | Proposed (M2) |
+| [0013](0013-model-selection-and-search.md) | Searchable model selection, persisted as a config binding; live discovery is ephemeral | Proposed (M6) |
 
 ADRs 0001–0003 are scheduled as deliverables of milestone M0 (see
 [PLAN.md](../PLAN.md#m0--bootstrap-2-days)); ADR-0004 is drafted with the provider design and accepted
@@ -33,7 +34,10 @@ ADR-0011 adds the diagnostics half of the observability story (the event log is 
 `tracing` log is not) and is accepted in M0 with its contract in [observability.md](../observability.md).
 ADR-0012 makes task estimates event-sourced facts rather than derived UI values: the heuristic and the
 event/command contract land in M2, the forecast overlay in M6, and calibration plus the optional Jev
-refinement in M7.
+refinement in M7. ADR-0013 adds a searchable model picker: the shared query parser and `models list
+--search` land in M3, the picker, profile form, and atomic config writer in M6; a selection is a
+model-only `[agents.model_bindings]` entry recorded through `ReloadConfig`, while the live catalogue is
+ephemeral and never an event.
 
 ## Rules
 

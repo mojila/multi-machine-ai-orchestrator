@@ -119,6 +119,29 @@ Add an entry per provider when something needs a workaround. Keep it factual and
 - Verified on: YYYY-MM-DD by <name>, `mta doctor` output attached to the issue
 ```
 
+## Model discovery for the picker
+
+`GET {base_url}/models` is defined by the OpenAI API but implemented loosely across compatible servers.
+The picker treats it as **shallow metadata**: it uses the id (and `owned_by` when present) only, never
+inferring context window, pricing, or capabilities. A discovered id with no `[[models]]` profile is
+marked `not configured` and cannot start a run until the profile form supplies those fields
+([ADR-0013](adr/0013-model-selection-and-search.md)).
+
+Rules the client follows:
+
+- Send the provider's normal auth and headers; never log the request headers or the key. Model ids are
+  not secrets.
+- Accept either `data: [{id, ...}]` or a bare array; ignore unknown fields; keep the provider's order for
+  the unranked list (the picker applies its own deterministic ranking).
+- Treat a provider 401/403/404/timeout as a per-provider error row, not a picker failure; configured
+  models stay selectable. A `404` usually means the server does not implement `/models` — fall back to
+  the configured profiles and say so.
+- Cache the result in memory for `[model_selection].discovery_ttl_s` (default 300); refresh on picker open
+  when stale and on `Ctrl-R`/`mta models refresh`. Never call it per keystroke and never from a background
+  poll.
+- System One providers use `GET /v1/models?modality=systemone`; a plain `/models` may omit them
+  ([Jev quirks](#kenari-system-one--manual-probe-2026-10-21)).
+
 ## Chat compatibility rules we rely on
 
 - `POST {base_url}/chat/completions`, `stream: true`, optional `tools`, optional

@@ -30,6 +30,10 @@ orchestrator with a Kanban TUI.
 - **Estimates are events, not render-time math.** A card's effort and run forecast are `TaskEstimated`
   facts with provenance, confidence, and an idempotent `inputs_hash`; a rebuild must reproduce them
   without running the estimator or a model ([ADR-0012](adr/0012-task-estimation.md)).
+- **Model choices are config, discovered models are not state.** A picker selection is a model-only
+  `[agents.model_bindings]` entry (or a per-run override) written atomically and recorded through
+  `ReloadConfig`; live `/models` results are an ephemeral cache and never enter the log
+  ([ADR-0013](adr/0013-model-selection-and-search.md)).
 - **Diagnostics are not the audit trail.** Debug output goes through `tracing` into rotating files,
   is never replayed, and is never the only record of a state change — that is what events are for
   ([observability.md](observability.md), ADR-0011). A decider does not log at all (`mta-domain` has no

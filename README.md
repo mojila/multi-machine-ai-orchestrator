@@ -28,7 +28,8 @@ configurable agents, executed against any OpenAI-compatible provider, and review
   [0009 event-sourced core](docs/adr/0009-event-sourced-core.md),
   [0010 agent and skill discovery](docs/adr/0010-agent-and-skill-discovery.md),
   [0011 diagnostics](docs/adr/0011-observability-and-diagnostics.md),
-  [0012 task estimation](docs/adr/0012-task-estimation.md)
+  [0012 task estimation](docs/adr/0012-task-estimation.md),
+  [0013 model selection and search](docs/adr/0013-model-selection-and-search.md)
 
 ## Intended shape
 
@@ -69,6 +70,11 @@ Every card also carries an automatic effort estimate (human hours) and an option
 `T` opens a forecast overlay with throughput and a projected finish. Estimates are events too — with
 provenance, confidence, and a manual pin — so a rebuild reproduces the board exactly, and the heuristic
 works offline while Jev adds a bounded refinement only when the card is ambiguous.
+Models are chosen, not memorised: `M` opens a searchable catalogue over configured profiles and each
+provider's live `/models` (`ctx>=100k tools @openai`), sets an agent default as a model-only binding or a
+one-run override, and refuses to start an unprofiled id until context window and capabilities exist —
+so a convenient picker never becomes a run against an invented price. The choice is a config write
+(comment-preserving, atomic, reloaded as events), not a hidden database field.
 Multi-machine execution (daemon + workers) is deliberately deferred to v0.2;
 replicating the event log is the intended protocol, and the crate boundaries are designed for it.
 

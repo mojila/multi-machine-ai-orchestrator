@@ -9,6 +9,9 @@
 # The diagnostics stack (tracing 0.1.44 / tracing-subscriber 0.3.23 with no
 # `env-filter` / tracing-appender 0.2.5) is measured in M0 and booked against
 # release_mta_mb rather than guessed; see docs/observability.md and ADR-0011.
+# `toml_edit` 0.25.17 (MSRV 1.85) is the only addition for the model picker's
+# comment-preserving config writes (ADR-0013); it is measured in M6 and is not
+# expected to move the binary budget.
 
 [target]
 # Whole `target/` directory after a normal dev + test + release build.

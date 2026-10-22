@@ -32,6 +32,7 @@ products — not as a chat window.
 | G10 | Event-sourced core: the log explains the state | Every persisted change is a validated command appended to an append-only event log; every view is a projection that can be dropped and rebuilt to the same bytes; no scheduling, approval, or expiry logic depends on a polling cadence |
 | G11 | Debuggable by construction | Every command, effect attempt, provider call, decision, and deadline carries ids that join it to the event log, into a rotating log under `$XDG_STATE_HOME/mta/logs`; secrets and prompt text never reach a record (a property test proves it); the TUI never writes to the terminal; `mta doctor --logs` reports the resolved level, directives, and sinks |
 | G12 | Plan with estimates, not guesses | Every card carries an automatic effort estimate with provenance and confidence; the board shows per-column and overall totals plus a projected finish; estimates are event-sourced, reproducible, manually overridable, and calibrated from recorded actuals — never from a silent mutable field |
+| G13 | Choose models by search, not by memorised aliases | A picker searches configured and live-discovered models with filters, sets an agent's default or a one-run override, and requires a profile before an unconfigured model can run; a selection survives restart in config and is visible in `agents show` |
 
 ### 1.2 Non-goals for v0.1
 
@@ -94,6 +95,8 @@ products — not as a chat window.
 | **Task** | Unit of work: title, description, priority, due date, tags, assignee, dependencies, parent. |
 | **Estimate** | A card's expected **effort** (human minutes, the planning number) plus an optional **run forecast** (wall-clock and cost for the assigned agent). Derived automatically, with `source`, `confidence`, and an `inputs_hash`; a manual override is just another `TaskEstimated` with `source = user`. Event-sourced, never a mutable side column. |
 | **Agent** | Named persona: system prompt, chat model alias, optional decision model alias, tool allowlist/policy, budgets, tags used for auto-assignment. Definitions come from `mta` config, the DB, or OpenCode/`.agents` Markdown files. |
+| **Model profile** | A `[[models]]` entry: alias, provider, model id, context window, max output, pricing, capabilities, params. The profile is the only thing a run can resolve; a live `/models` result that has no profile is discoverable but not selectable until one is added. |
+| **Model binding** | A model-only override for an agent: `[agents.model_bindings].<agent-name> = "<alias>"`. It cannot change a prompt, tool policy, or budget, so it is safe to apply to a file-discovered agent without triggering whole-definition replace. Precedence: per-run override > binding > definition `model` > inherit. |
 | **Agent source** | Provenance of a definition — `config`, `db`, `opencode-global`, `opencode-project`, `agents-global`, `agents-project` — with path, content hash, and (for project files) a trust record. |
 | **Skill** | A `.agents/skills/<name>/SKILL.md` workflow: name, description, and instruction text, plus optional present-only `references/`. A **separate catalogue kind** — attachable to a run as extra context, never selectable as the agent that executes it (no model, no permissions, no tools). |
 | **Sub-agent** | A child run of the same task, launched by an agent through the `delegate` tool: fresh context, own model/policy/budget/transcript, depth-limited, no extra board card. |
@@ -111,7 +114,8 @@ products — not as a chat window.
    Backlog to Todo; set priorities.
 2. **Delegate** — open a card, press `a`, pick an agent from a fuzzy list (Jev's suggested agents and
    confidence appear first when the decision provider is enabled); optionally attach a `.agents` skill as
-   extra context from the same dialog; press `r` (or move to Doing with
+   extra context from the same dialog and choose a one-run **model** override in the searchable picker
+   (`M`, or the model row); press `r` (or move to Doing with
    auto-run on) to start a run; watch live status on the card. When the project defines OpenCode or
    `.agents` agents, the assigned agent may delegate parts of the work to them (`delegate` tool → child run).
 3. **Supervise** — open the run panel: streaming assistant text, tool calls with args/result excerpts,
@@ -167,8 +171,8 @@ products — not as a chat window.
   single worst-metric glyph, and below 80 columns it is dropped entirely — the `S` overlay always has
   the full picture.
 - Overlays: card detail/editor, run transcript (scrollable), decision log, event log, diagnostics log,
-  forecast/estimates, system monitor, command palette, agent/skill picker, help, approval dialog,
-  confirm dialog. One overlay
+  forecast/estimates, system monitor, command palette, agent/skill picker, **model picker and model
+  profile form**, help, approval dialog, confirm dialog. One overlay
   at a time; `Esc` always closes; unsaved edits prompt; clicking outside closes a non-destructive overlay
   but never a confirm dialog. The event log (`E`) is the audit view; the diagnostics log (`O`) is the
   ephemeral debug view — a different record with a different lifetime
@@ -194,6 +198,7 @@ products — not as a chat window.
 | `E` | Open the event log overlay (recent events; `Enter` expands the causation chain) |
 | `S` | Open the system monitor overlay (CPU per core + load + temp, RAM/swap, disks per mount, top processes) |
 | `T` | Open the forecast overlay: open-effort totals by column/tag/agent, throughput, projected finish, run-time/cost forecast, calibration table, unestimated cards |
+| `M` | Open the model catalogue: fuzzy search + filters over configured and live-discovered models; set an agent default (binding) or a one-run override, or add a profile for an unconfigured model |
 | `O` | Open the diagnostics log overlay (level/target filters, search, follow; `:log <level>` retunes live) |
 | `y` | Copy task ID / run ID (context-dependent) |
 | `/` | Filter: `#tag`, `@agent`, `is:blocked`, `due:<date>`, free text (FTS) |
@@ -222,6 +227,8 @@ mouse-only features)
 | click | scrollbar track / thumb | Page-jump / start a drag |
 | drag | scrollbar thumb | Scroll continuously (clamped at both ends, never overscrolls) |
 | click | palette row | Execute that command, with the palette's own confirmation |
+| click / double click | model-picker row | Select / choose the model (same as `Enter`); clicking the search field focuses it |
+| click | picker filter chip / `[refresh]` hint | Apply that filter / force a discovery refresh (same as `Ctrl-R`) |
 | click | approval `[approve]` / `[deny]` | The same guarded action; destructive approvals still open the confirm dialog |
 | click | outside a modal | `Esc` (close) — except confirm dialogs, which ignore outside clicks |
 | hover | any region | Nothing, unless `[ui].hover = true`: then only a colour highlight |
@@ -267,6 +274,7 @@ mta task actual <id> 3h                      # record actual effort (the calibra
 mta estimate [--board] [--json]              # open-effort totals, per column/tag/agent, projected finish
 mta estimate recompute [--task <id>|--all]   # bounded, idempotent re-estimate (no background sweep)
 mta run <task-id> [--follow]        # headless single run
+mta run <task-id> --model <alias>   # one-run model override (not persisted; validated against a profile)
 mta run <task-id> --skills <id,...>   # attach .agents skills as extra context (never as the executor)
 mta run <task-id> --compact=auto|off [--compact-at N]   # per-run context policy override
 mta runs compact <id>               # force a compaction at the next safe point
@@ -281,6 +289,13 @@ mta skills list [--all] [--json]    # convenience: `agents list --kind skill`
 mta skills show <id>                # description, body size, present resources, interface, trust state
 mta skills trust <id>               # headless trust for a project skill (prints file hash)
 mta models list [--modality systemone] [--context]   # from configured providers (GET /models)
+mta models list --search "ctx>=100k tools @openai" [--all] [--json] [--refresh]
+                                     # same query grammar as the TUI picker (ADR-0013)
+mta models show <alias>              # profile, resolution, availability, shadowing
+mta models add <provider/model> [--alias <a>] [--context N] [--tools] [--json-mode]
+                                    # append a [[models]] profile (atomic config edit + ReloadConfig)
+mta models set|unset <agent> [alias] # write/remove an [agents.model_bindings] entry
+mta models refresh [--provider <name>]   # one-shot discovery; never a background poll
 mta decide --model jev --state-file ctx.json --questions q.json   # debug one typed decision
 mta decisions [--task <id>] [--run <id>]  # audit log of decisions and outcomes
 mta events tail [--follow] [--kind <type>] [--stream <id>]   # the log itself, as it is written
@@ -429,6 +444,17 @@ and `rust-toolchain.toml` together; until then the pin holds and `cargo tree -d`
 **Identifiers:** UUIDv7 as TEXT (sortable, no coordination needed later). **Timestamps:** INTEGER
 Unix milliseconds UTC; formatting at the edge. **Version column** on tasks for optimistic concurrency
 (future remote workers, and cheap conflict detection if two runs update a card).
+
+**Model resolution.** A run has exactly one resolved chat model, chosen at `StartRun`/`BeginRun` in this
+order: the run's `model_alias` override (from the run dialog or `mta run --model`, never persisted) →
+`[agents.model_bindings].<agent-name>` → the agent definition's `model` → the parent/root run's model
+when `[agents].inherit_model = true` → unresolved (the run cannot start). A binding is model-only and
+never merges a prompt, tool policy, or budget; that is what makes it safe for file-discovered agents
+([ADR-0013](adr/0013-model-selection-and-search.md)). `RunQueued.model_source` records the winning layer
+(`override | binding | definition | inherit`) so a run can explain itself, and `RunStarted` snapshots the
+resolved alias. An alias that has no `[[models]]` profile — including a live-discovered id the user has
+not profiled — is rejected; the picker opens the profile form instead of starting a run with an invented
+context window or price.
 
 **Column kind drives automation:**
 
@@ -660,7 +686,10 @@ CREATE TABLE agents (
                                     -- only 'agent' is stored here in v0.1; skills live in their own
                                     -- table (below) because they carry no model/policy. The column is
                                     -- present so a future kind can share the roster surface.
-  model_alias TEXT,                 -- NULL = inherit the parent/root run's model (§3.6.1)
+  model_alias TEXT,                 -- the definition's declared model; NULL = no declaration (§3.6.1)
+  model_binding TEXT,               -- [agents.model_bindings] value (model-only); NULL = none
+  effective_model TEXT,             -- agent-level resolution: binding > definition; NULL = inherit/unresolved
+  model_source TEXT,                -- binding | definition | inherit | none (why effective_model won)
   system_prompt TEXT NOT NULL,
   decision_model TEXT,               -- optional override; falls back to [decisions].model
   tools_json TEXT NOT NULL,          -- computed allowlist (allow + ask tools)
@@ -786,6 +815,10 @@ CREATE TABLE runs (
     ('queued','running','awaiting_approval','succeeded','failed','cancelled',
      'budget_exhausted','blocked','interrupted')),     -- §3.3
   trigger TEXT NOT NULL,              -- manual | schedule | retry | subtask
+  model_alias TEXT,                   -- resolved model for this run, from RunQueued/RunStarted
+  model_source TEXT NOT NULL DEFAULT 'definition'
+    CHECK (model_source IN ('override','binding','definition','inherit')),
+                                      -- which layer chose it (ADR-0013); override is never persisted
   retry_of TEXT REFERENCES runs(id) ON DELETE SET NULL,
   day_key TEXT NOT NULL,              -- local calendar day 'YYYY-MM-DD', computed in Rust (not SQLite localtime)
   started_at INTEGER, ended_at INTEGER,
@@ -1018,9 +1051,35 @@ The engine degrades: no `tools` capability → the agent gets a single-shot "ans
 no tool loop, and the run is labelled `degraded` in the UI. This is how exotic OpenAI-compatible
 servers stay usable without per-provider code.
 
+**Model catalogue and search.** The picker and `mta models list` read one merged catalogue: `[[models]]`
+profiles (full metadata), plus a shallow live view from each enabled provider's `GET /models`
+(`provider/model-id`, owner, no context/pricing/capabilities), plus recent use from the `runs`
+projection. A live-only row is marked `not configured` and is **not selectable**: choosing it opens a
+profile form (alias, provider, model id, required context window, optional pricing, capability toggles),
+which appends a `[[models]]` entry before the original selection completes. Capability defaults are
+conservative (`streaming = true`, `tools = false`, `json_mode = false`), and unknown pricing is `0` with
+an `unknown` badge, so a guessed profile is visible rather than silently wrong.
+
+The catalogue is **ephemeral** (like host metrics): a per-provider in-memory cache with
+`[model_selection].discovery_ttl_s` (default 300), refreshed when the picker opens if stale, and forced by
+`Ctrl-R` / `mta models refresh`. No background poll, no network on a keystroke, and no catalogue event —
+a replay with every provider offline produces identical domain state. A failed provider is a row group
+with its error while the configured models remain usable.
+
+Search is a small hand-written parser, not a regex engine: free terms fuzzy-match alias, model id, and
+provider; `@provider`; `ctx>=100k` / `ctx<=32k` / `ctx=200k` (also `m`); `tools`, `no-tools`, `json`,
+`stream`, `systemone`, `chat`, `free`, `configured`, `unconfigured`, `available`, `unavailable`,
+`recent`; `-token` negates; `"a phrase"` is literal. Ranking is deterministic: exact alias → alias prefix
+→ word boundary → subsequence → provider/id substring; ties by configured, available, recent, then alias.
+An empty query shows configured + available + recently used. The same parser backs the CLI and the TUI,
+so `--json` and the picker cannot disagree. `mta-provider` owns it; it does no I/O.
+
 **Configuration** (see Appendix A): providers (transport + auth), models (alias → provider, model id,
 params, pricing, capabilities), agents (alias + prompt + tool allowlist). Model aliases are resolved
-at run start, so swapping models is config-only.
+at run start, so swapping models is config-only. A model selection is written by the engine's
+`ConfigEditor` (`toml_edit`, atomic temp+rename, validate-before-write, hash-checked against external
+edits, `.bak` restore on a failed reload) and then recorded through `ReloadConfig`; no decider writes a
+file, and no secret is ever written ([ADR-0013](adr/0013-model-selection-and-search.md)).
 
 **Conformance suite** (`mta-provider/tests`): recorded fixtures for
 OpenAI, OpenRouter, Groq, Ollama, vLLM, LM Studio + `httpmock` for failures. Cases: plain text
@@ -1527,13 +1586,15 @@ whether auto-compaction is on, and the estimator calibration sample count.
 ### 3.8 TUI architecture
 
 - **Pattern:** Elm-ish, no global mutable state. `AppState` (board VM, selection, overlay stack,
-  filter, command prompt, agent list, run transcripts, toasts, connection/engine status, applied `seq`,
-  estimate totals and forecast), + `Action` enum + `update(&mut AppState, Action) -> Vec<Command>` +
-  `view(&AppState, &mut Frame) -> HitMap`. Commands are requests to the engine (`StartRun`, `MoveTask`,
-  `LoadTranscript`, `DecideApproval`) and are named **`Command`**, deliberately not `Effect`, because
-  "effect" is now the engine's word for a side effect it runs (ADR-0009 §6); one name per concept. The
-  engine replies with **events** — the same events that are appended to the log — which the UI folds into
-  its view models. Fully testable without a terminal; the hit map is returned from the pure render so it
+  filter, command prompt, agent list, model catalogue VM, run transcripts, toasts, connection/engine
+  status, applied `seq`, estimate totals and forecast), + `Action` enum + `update(&mut AppState, Action)
+  -> Vec<Command>` + `view(&AppState, &mut Frame) -> HitMap`. Commands are requests to the engine
+  (`StartRun`, `MoveTask`, `LoadTranscript`, `LoadModels`, `DecideApproval`) and are named **`Command`**,
+  deliberately not `Effect`, because "effect" is now the engine's word for a side effect it runs
+  (ADR-0009 §6); one name per concept. The engine replies with **events** — the same events that are
+  appended to the log — which the UI folds into its view models, and with query results for ephemeral
+  data (`LoadModels` returns a `ModelCatalogueVm`, like a transcript load). Fully testable without a
+  terminal; the hit map is returned from the pure render so it
   can be asserted in tests. `BoardVm` maintains the per-column estimate subtotals and the header total
   incrementally as it folds events; a cold start seeds them from one aggregate query, so `view()` never
   sums the board itself.
@@ -1562,12 +1623,23 @@ whether auto-compaction is on, and the estimator calibration sample count.
   the overlay. The only way host state can reach the log is the opt-in, debounced
   `HostPressureObserved` event (§3.9), which exists so a run failure can be explained rather than
   merely observed.
+- **Model catalogue (ephemeral, never logged):** the picker renders a `ModelCatalogueVm` fetched with
+  `LoadModels` and cached by the engine per provider for `[model_selection].discovery_ttl_s`; typing
+  filters that snapshot and never performs I/O. `Ctrl-R` sends a refresh. `ModelPicker` is a reusable
+  overlay with a `ratatui-textarea` search field, a virtualised result list, filter chips, badges
+  (`configured` / `not configured`, `available` / `unavailable`, `ctx`, `tools`, `json`, `free`), and
+  keyboard/pointer parity. `ModelProfileForm` is a small modal that gates an unconfigured id: it requires
+  a context window, defaults capabilities conservatively, and submits the same `ConfigEditor` write as
+  `mta models add`. Selection returns a `ModelRef` to whoever opened the picker (agent editor, run dialog,
+  or catalogue browser); the write itself is an engine `ConfigEditor` call followed by `ReloadConfig`,
+  never a direct file write from the render path.
 - **Widgets:** stock `Block`, `Paragraph`, `List`, `Table`, `Tabs`, `Clear`, `Scrollbar` plus custom
   `BoardWidget` (lays out columns, handles horizontal scroll, computes visible card ranges),
   `CardWidget` (title wrap, badges, progress bar, status glyph), `RunPanel` (virtualised transcript
   list — only render visible lines; decision steps show `question → answer (confidence)`),
   `DecisionLog` (purpose, question, answer, confidence, model, applied flag), `ApprovalDialog`,
-  `Palette`, `HelpOverlay`, `Toast`, `AgentRoster` (mode/source/trust/warnings), `SubagentStep`
+  `Palette`, `HelpOverlay`, `Toast`, `AgentRoster` (mode/source/trust/warnings), `ModelPicker`
+  (search + filters + virtualised rows), `ModelProfileForm`, `SubagentStep`
   (collapsed child run summary), `CompactionStep` (tokens before → after, fallback badge),
   `EventLogOverlay` (the newest events, `seq · type · stream · actor`, expandable to a causation chain —
   the debugging surface that event sourcing owes its users), `SystemOverlay` (`S`: per-core CPU bars with
@@ -1647,6 +1719,18 @@ whether auto-compaction is on, and the estimator calibration sample count.
   must not alter a projection rebuild (ADR-0012). The estimator is dependency-free integer/float
   arithmetic in `mta-domain`; no new crate is added. An estimate never gates a run, a lane move, or a
   budget reservation, so a bad configuration degrades planning quality, not execution.
+- **Model selection:** `[model_selection]` governs the picker — `discover` (default true; query
+  `/models`), `discovery_ttl_s` (default 300), `include_unconfigured` (default true; show, never
+  silently run), `recent_limit` (default 5), and `write_target` (`auto` | `global` | `project`).
+  Agent defaults live in `[agents.model_bindings]` (`name = "alias"`), a model-only layer that never
+  merges a prompt, tool policy, or budget; precedence is per-run override > binding > definition
+  `model` > `inherit_model` ([ADR-0013](adr/0013-model-selection-and-search.md)). A selection is
+  written only by the engine's `ConfigEditor`: `toml_edit` preserves comments and ordering, the new
+  document is parsed and validated before an atomic temp+rename, one `.bak` is kept, and a hash captured
+  when the picker opened aborts the write if the file changed underneath. A failed `ReloadConfig`
+  restores the backup, so the file and the UI cannot disagree. The editor refuses to write through a
+  symlink pointer swap, preserves the file mode, and never writes a secret or an API key. Config is
+  never written from a decider; the durable result is the `ReloadConfig` diff.
 - **Pointer/UI:** `[ui].mouse` (default **true**) enables pointer input; `scroll_lines` (default 3) is
   the wheel-notch distance; `hover` (default false) highlights the region under the pointer;
   `double_click_ms` (default 400) sets the double-click window; `repaint_ms` (default 250) is the
@@ -1686,9 +1770,12 @@ whether auto-compaction is on, and the estimator calibration sample count.
 - **Reload:** the engine watches the config file, and the TUI's `:reload` submits a `ReloadConfig`
   command. A valid config appends `ConfigReloaded{config_hash, changed_sections[]}` and the new
   `Arc<Config>` is used to resolve models/agents at the start of each **new** run (a fold-relevant
-  change is an event, so replay sees it); in-flight runs keep their resolved model and budget. Invalid
+  change is an event, so replay sees it); in-flight runs keep their resolved model and budget. A model
+  binding diff also appends `AgentModelBound`/`AgentModelUnbound` on `agent:<id>`, and an idle reload
+  appends nothing. Invalid
   config is rejected with a toast + log line, `CommandRejected` is appended, and the old config stays
-  active. This is how "provider swap without restart" is actually true.
+  active. This is how "provider swap without restart" is actually true, and why a picker selection and a
+  hand edit of the same file converge on the same events.
 - **Decision config:** decision providers are ordinary `[[providers]]` entries with
   `kind = "systemone"`; `[decisions]` selects the default model alias, confidence threshold, which
   policies are enabled, and `store_state` (`full | excerpt | hash`). An agent may override
@@ -1811,6 +1898,7 @@ build output as a **budgeted resource**, not an unlimited cache. Full rationale 
 | Provider abstraction | thin OpenAI-chat wire + separate System One (Jev) decision wire, capability flags | "OpenAI-compatible" is the requested standard; Jev is deliberately not chat and forcing it into that trait would fail | per-vendor SDKs, generic multi-protocol layer |
 | Jev integration | first-class `DecisionModel` with typed questions, advisory by default | `noul`/`choice`/`score` are calibrated and auditable; cheap vs another chat call | prompting the chat model to self-rate; MCP-only; auto-approving from model output |
 | Task estimation | event-sourced `TaskEstimated`/`TaskEffortRecorded`; deterministic heuristic first, then calibration from actuals, then an optional Jev `score` refinement; effort primary + run forecast; manual pin wins; leaf-only totals | an estimate is a persisted, replayable fact with provenance — recomputing it at render time would change under the user and break rebuild identity; human effort and agent time are different numbers, so they calibrate separately; the heuristic works offline and costs nothing | computing totals in `view()` from mutable columns (unstable, not replayable), one opaque LLM estimate per card (cost, latency, unauditable), story points only (no duration/cost forecast), a separate estimation table written outside the log |
+| Model selection | searchable picker over configured + live-discovered models; unconfigured ids need a profile; agent default persisted as a model-only `[agents.model_bindings]` entry; per-run override lives only in the command; selection recorded via `ReloadConfig` | the user needs to find models, not memorise aliases; a binding cannot freeze a file agent's prompt/permissions (whole-definition replace), and the profile gate prevents runs against an invented context window or price; discovery is non-reproducible metadata, so it stays out of the log | read-only roster + `$EDITOR` (no search), sparse `[[agents.definitions]]` override (freezes the definition), `AgentModelSelected` in the DB (splits model identity from its config profile), auto-adding every discovered id (guesses pricing/capabilities) |
 | Agent loop | explicit step machine with budgets + approvals | auditable, testable, safe | free-form agent framework (opaque, unbounded) |
 | Sub-agents | reuse OpenCode Markdown definitions; child runs on `mta`'s runtime; permissions restrict only | the roster already exists on disk; one execution/audit/budget model; untrusted-project gate | shelling out to `opencode` (bypasses budgets/approvals/audit), an mta-only format (duplicated prompts), field-level merge (opaque effective policy) |
 | Catalogue discovery | multi-root: `.opencode/agents/**`, `.agents/agents/**` (+ `.agents/*.md`), globals in `~/.config/opencode/agents` and `~/.agents`, config last; narrow globs, and a skill directory is a black box except `SKILL.md` | that is where agents and skills actually live on a real machine; one scan, one roster surface; the narrow glob is what stops `references/*.md` being registered as agents | a single `.opencode/agents` root (misses the `.agents` convention), `.agents/**/*.md` (registers a skill's reference corpus as agents), scanning every `.md` under the project (slow, wrong) |
@@ -1923,7 +2011,9 @@ column totals agree with the folded fixture; snapshots stable; no engine require
 - **System One (Jev)**: `DecisionModel` trait, `POST /v1/systemone` client, typed `noul`/`choice`/
   `score` request/response types, pre-flight and answer validation, IDR→USD cost conversion,
   `GET /v1/models?modality=systemone`, degradation/disable behaviour on 402/404.
-- `mta models list [--modality systemone]`, `mta doctor --provider` (chat probe + decision probe),
+- `mta models list [--modality systemone] [--search <query>] [--json] [--refresh]`, the shared pure
+  model-query parser (fuzzy + `@provider` + `ctx>=` + capability/modality tokens), `mta doctor
+  --provider` (chat probe + decision probe),
   `mta decide --state-file --questions` debugging command, hidden `mta chat "hello"` smoke command.
 - `httpmock` conformance suite (§3.5, §3.5.1) with checked-in fixtures, including byte-split SSE,
   UTF-8-split cases, malformed answers, and a recorded real Jev response.
@@ -2030,11 +2120,17 @@ transcript/budget/cancellation as specified, and attaches a skill whose text app
 the log; a malformed or hostile file of either kind cannot crash startup, widen policy, or be silently run
 as an agent.
 
-### M6 — Interactive TUI (6 days)
+### M6 — Interactive TUI (7 days)
 
 - Card editor (title/description/priority/due/tags), assign picker, move/reorder with guards, typed
   confirmations, command palette actions, agent/model manager (read + enable/disable; create/edit via
   `$EDITOR` on config).
+- **Model selection + search (ADR-0013):** the `M` catalogue and the shared `ModelPicker` (fuzzy query
+  parser, filter tokens, ranking, `Ctrl-R` discovery refresh), a model row in the agent editor and the
+  run dialog (per-run override), `ModelProfileForm` for unconfigured live ids, `ConfigEditor`
+  (comment-preserving `toml_edit`, atomic write, hash check, `.bak` restore) plus
+  `[agents.model_bindings]` → `ReloadConfig` → `AgentModelBound`, `mta models show|add|set|unset`, and
+  `mta run --model`. Snapshot and pointer-parity tests for the picker and form.
 - **Estimate capture + forecast:** the estimate field in the card editor (blank = auto, `2h` = pin,
   `-` = clear, `a` = recompute), the accept dialog's optional actual effort (which appends
   `TaskEffortRecorded`), the `T` forecast overlay (open effort by column/tag/agent, throughput,
@@ -2057,7 +2153,9 @@ as an agent.
   (tmux, 40/80/120/200 columns, resize, paste, mouse on/off, SIGTERM, panic).
 
 **Exit:** the full flow in §2.2 works entirely in the TUI, with keyboard or mouse; approval decisions in
-the UI and from the CLI behave identically; no pointer path bypasses a confirmation; snapshots stable.
+the UI and from the CLI behave identically; no pointer path bypasses a confirmation; snapshots stable;
+a model can be found by search, profiled if newly discovered, bound to an agent or used for one run, and
+the choice survives a restart without hand-editing TOML.
 
 ### M7 — Orchestration (6 days)
 
@@ -2115,8 +2213,8 @@ deliberately corrupted projection is caught by `verify` and repaired by `rebuild
 §8 signed off; migrations pass from empty and from every released tag (there is no prior schema before
 v0.1).
 
-**Total:** 51 engineer-days itemised (M0 2 · M1 7 · M2 6 · M3 5 · M4 5 · M5 6 · M5.5 4 · M6 6 · M7 6 ·
-M8 4), **~59 with a 15% buffer**. Event sourcing is the single biggest reason M1 and M8 grew
+**Total:** 52 engineer-days itemised (M0 2 · M1 7 · M2 6 · M3 5 · M4 5 · M5 6 · M5.5 4 · M6 7 · M7 6 ·
+M8 4), **~60 with a 15% buffer**. Event sourcing is the single biggest reason M1 and M8 grew
 (+4 and +1): the event store, deciders, projection framework, replay/rebuild tooling, and upcasters are
 front-loaded infrastructure that the later milestones then consume. M0 grew by 1 (+1 day) for the
 diagnostics baseline — subscriber, sinks, filter parser, redaction and its property test, the panic-hook
@@ -2129,7 +2227,9 @@ status line, overlay stack, and event loop rather than opening a milestone of th
 same roster surface as the agents that milestone already delivers. M2, M6, and M7 each grew by 1 (+3 days)
 for auto-estimation: the heuristic and the read-only card/column/header totals in M2, overridable
 estimates plus the `T` forecast overlay in M6, and calibration, the Jev refinement, throughput, and the
-`mta estimate` CLI in M7. Provider quirks, terminal plumbing,
+`mta estimate` CLI in M7. M6 grew by 1 (+1 day) for searchable model selection: the shared query parser
+lands in M3, while the picker, profile form, and the atomic config-writer path (the part that must not
+corrupt a user's TOML) land in M6. Provider quirks, terminal plumbing,
 and restart semantics are the usual overruns; they are inside these tasks, not extra scope.
 The critical path is M1 → M3 → M4 → M5 → M5.5 → M6. With two people, M2 can run alongside M3 and M8 docs
 can start during M6/M7.
@@ -2157,6 +2257,8 @@ this phase adds transport, not a rewrite.
 | Estimation events & display | `TaskEstimated` is idempotent by `inputs_hash` (a second auto estimate appends nothing); a manual pin survives an auto re-estimate and an unrelated edit; clear → `?`; replay/rebuild reproduces every estimate **without invoking the estimator**; leaf-only totals count a parent+child once; filtered total reads `12h/38h`; `~`/`=`/`?` semantics; low-confidence and `insufficient history` labels; `T` overlay snapshots at four sizes; `doctor --estimate` agrees with the header |
 | Estimate calibration & forecast | EWMA fixture with the fixed alpha and ratio clamp; a rebuild of `estimate_accuracy` is byte-identical; an actual with no prior estimate is ignored; run forecast groups by `(agent, model, tag)`; a finish date appears only after `throughput_min_days`; Jev `score` mapping at bucket boundaries; a disabled/under-confident/402 Jev leaves the heuristic and appends no second estimate |
 | Agent definitions | fixtures for V2 lists + V1 maps, precedence/tombstones, nested IDs, malformed/hostile files; property test that agent rules never widen global policy; model-resolution matrix; trust-per-hash re-prompt |
+| Model selection & search | query-parser table (free terms, `@provider`, `ctx>=`/`<=`/`=`, `tools`, `-negation`, quoted phrase, unknown token → free text); ranking is deterministic and favours exact alias → prefix → word boundary → subsequence, then configured/available/recent; discovery cache honours the TTL and `Ctrl-R`, a provider 401 leaves configured rows usable; an unconfigured row cannot be chosen until `ModelProfileForm` saves; picker snapshots at four sizes (empty/loading/many/no-match); click and key produce the same action; per-run override appears in `RunQueued` and is gone after restart, while a binding survives a reload; unknown, unprofiled, and wrong-modality aliases are rejected; a model without `tools` when the agent has tools warns in the run dialog |
+| Config writer | comment/ordering preservation through `toml_edit`; validation happens before any rename; atomic replace + `.bak`; a hash mismatch after an external edit aborts without writing; a reload failure restores the backup and appends nothing; read-only/symlinked files are refused; no `api_key`/`Authorization` text is ever written; `[agents.model_bindings]` diff emits `AgentModelBound` once and an identical reload emits nothing; replay reproduces `effective_model` and `model_source` |
 | Catalogue discovery (agents + skills) | all four roots and the documented precedence, including `.opencode/agents` vs `.agents/agents` vs `.agents/*.md` in one directory and `list --all` shadow reporting; **the black-box regression test** — a skill directory carrying `references/chapter_0N.md` yields exactly one `kind = skill` entry and zero agents, which fails the moment the glob widens to `.agents/**`; `ScanCatalogs` twice unchanged appends nothing; skill frontmatter `name` vs directory mismatch; `agents/openai.yaml` and `openai.yml`; oversized `SKILL.md`; an unrecognised skill root (`.opencode/skills/…`) reported once and not read |
 | Skill attachment | `StartRun --skills` records `RunStarted.attached_skills[]` with bodies and `runs.skill_snapshot_json`; replaying that log needs no file on disk and is byte-identical after the `SKILL.md` is edited; over-cap, unknown, disabled, untrusted, and hash-mismatched attachments are each rejected without appending a run; a delegated child gets skills only when passed; `delegate` targeting a skill fails fast |
 | Delegation | `ScriptedModel` child runs: success/failure/budget/cancel/depth/cycle/child-approval, no scheduler-slot deadlock, result truncation |
@@ -2192,6 +2294,9 @@ the public test kit so users can reproduce agent behaviour without spending toke
 | Over-trusting Jev decisions | Wrong routing/priority, automation bias | Advisory by default, `min_confidence`, explicit `apply_*` switches, show model+confidence, record outcomes for calibration, never auto-approve side effects |
 | Estimates are wrong, stale, or silently drift | Bad planning, lost trust in the numbers | Provenance + confidence on every card, `?` rather than `0` when unknown, human effort and agent time calibrated from separate evidence, a manual pin that auto-estimation cannot overwrite, `insufficient history` instead of a fake finish date, and no gating of execution on an estimate; `mta estimate recompute` is explicit and `doctor --estimate` shows the sample counts |
 | Estimation becomes a hidden poll or log spam | Event log churn, Jev spend, UI jitter | The estimator is event-driven (`EstimateTask` effect) with no sweep; identical `inputs_hash` appends nothing; one decision refinement in flight per card; `refine_with_decision` is a switch; a full replay reads stored estimates and never re-estimates |
+| A picker edit corrupts the user's config | Lost config, broken startup, distrust in the UI | One `ConfigEditor` writer: validate before write, `toml_edit` to preserve comments/formatting, atomic temp+rename, one `.bak`, and a hash check that aborts on an external edit; a failed reload restores the backup; the editor refuses a symlink pointer swap and preserves the file mode; tests cover each failure |
+| Live discovery is stale, slow, or leaks a key | Wrong model list, UI stalls, credential exposure | Discovery is opt-in, TTL-cached in memory, refreshed on open or `Ctrl-R`, never per keystroke and never a background poll; provider errors are per-row while configured models stay usable; requests reuse the provider's auth path and headers are never logged; no catalogue event, so replay is unaffected |
+| A discovered model has unknown pricing/capabilities | Surprise cost or a silently degraded run | An unconfigured id cannot start: the profile form requires a context window and defaults capabilities conservatively; unknown pricing is shown as `unknown` (0), and the run dialog warns when the chosen model lacks tools or is too small for the prompt |
 | Jev model id/contract drift (free ids change, MCP default id is stale) | Decisions fail | Resolve ids from `GET /v1/models?modality=systemone`, pin alias in config, `doctor` probe, fail-closed validation, deterministic fallback |
 | Decision state leaks sensitive task content | Privacy | Explicit state assembly, redaction, `store_state` hash/excerpt modes, document provider data flow |
 | Prompt injection via fetched content | Unauthorised actions | Untrusted-content wrapping, tool allowlist, approvals for side effects, injection tests |
@@ -2261,11 +2366,15 @@ the public test kit so users can reproduce agent behaviour without spending toke
 29. `feat(domain,tui): task estimation — heuristic estimator + `estimator_version`, `TaskEstimated`/`TaskEffortRecorded` events, `EstimateTask`/`SetTaskEstimate`/`ClearTaskEstimate`/`RecordTaskEffort` commands, `tasks` columns, card/column/header totals (+ property, golden, snapshot tests)` (M2)
 30. `feat(tui): estimate editor (auto/pin/clear), actual-effort capture on accept, `T` forecast overlay with calibration and unestimated lists, pointer parity (+ snapshots)` (M6)
 31. `feat(engine,cli): estimate calibration from actuals and run terminals, throughput + projected finish, Jev `task_estimate` refinement, `mta estimate`/`mta task estimate|actual`/`doctor --estimate` (+ fixtures)` (M7)
+32. `feat(provider,cli): model-query parser (fuzzy + @provider + ctx/capability tokens), ranked `mta models list --search|--json`, `mta models show|refresh` (+ parser/ranking tables)` (M3)
+33. `feat(engine,tui): searchable ModelPicker + ModelProfileForm, per-run override, `[agents.model_bindings]` → `AgentModelBound`, atomic `ConfigEditor` with hash check/.bak restore, `mta models add|set|unset` and `mta run --model` (+ snapshots, pointer parity, config-writer tests)` (M6)
 
 Item 28 was added after this list was first cut, so it is numbered last to keep the numbers stable even
 though it is M0 work: it is the diagnostics half of the bootstrap, and item 1's workspace/CI frame is
 where it lands. Items 29–31 keep the same append-only numbering for the estimation feature; they land in
-M2, M6, and M7 respectively, in the order above.
+M2, M6, and M7 respectively, in the order above. Items 32–33 append the model-selection work: the shared
+query parser and CLI search ride with the provider layer in M3, and the picker, profile form, and config
+writer land with the interactive TUI in M6 ([ADR-0013](adr/0013-model-selection-and-search.md)).
 **Definition of done (v0.1)**
 
 - [ ] All §1.1 goals demonstrated by the demo script; no P0/P1 bugs open.
@@ -2309,6 +2418,11 @@ M2, M6, and M7 respectively, in the order above.
       `mta estimate`; a manual pin survives edits and auto re-estimation, and clearing it returns the card
       to automatic control; `T` shows throughput and a projected finish only when the history supports it;
       `mta replay --dry-run` reproduces every estimate without invoking the estimator or Jev.
+- [ ] `M` opens a searchable model catalogue, a query like `ctx>=100k tools @openai` filters it, and a
+      selection either sets an agent binding or applies to one run; choosing a live-discovered id that
+      has no profile opens the profile form instead of starting a run, the choice survives a restart, and
+      `mta agents show` reports `(binding)`/`(definition)`/`(inherit)` plus the shadowed value; killing
+      the picker mid-write never leaves a partially written config.
 - [ ] DB migration from empty and from every previously released tag passes (no prior tag exists at
       v0.1; the rule starts with v0.1.1).
 - [ ] Security review of tool policies, secret handling, and injection tests signed off.
@@ -2396,6 +2510,13 @@ refine_with_decision = true         # one Jev score question for vague/uncertain
 refine_below_confidence = 0.55
 # The EWMA alpha, ratio clamp, and size buckets are fixed constants in the estimator, not config:
 # changing config must not change a projection rebuild (ADR-0012).
+
+[model_selection]                   # searchable picker (ADR-0013); discovery is ephemeral, never logged
+discover = true                    # query each enabled provider's GET /models
+discovery_ttl_s = 300              # in-memory cache; Ctrl-R / `mta models refresh` forces a refresh
+include_unconfigured = true        # show live ids with no profile (marked, not selectable until profiled)
+recent_limit = 5                   # recent-use rows in the empty-query view
+write_target = "auto"              # auto | global | project — where a picker edit is written
 
 [logging]                           # diagnostics only — never the audit trail (observability.md, ADR-0011)
 level = "info"                      # error | warn | info | debug | trace | off
@@ -2527,6 +2648,11 @@ inherit_model = true               # unresolved agent model inherits the parent'
 max_steps_cap = 40                 # clamps an agent file's `steps`
 default_child_usd = 0.50           # cap for a child run with no max_usd_per_run
 watch = true
+
+# Model-only user overrides for any agent, including file-discovered ones (ADR-0013).
+# Precedence: per-run override > this binding > the definition's `model` > inherit.
+[agents.model_bindings]
+# ops = "smart"                    # `mta models set ops smart`; never changes prompt/tools/permissions
 
 [skills]                            # .agents/skills/*/SKILL.md — attachable, never executable (ADR-0010)
 enabled = true

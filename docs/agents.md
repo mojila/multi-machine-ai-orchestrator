@@ -260,24 +260,41 @@ warning and is ignored.
 
 ## 5. Model resolution
 
-`model: provider/model#variant` is resolved at run start, in this order:
+A run resolves exactly one chat model, in this order:
+
+1. a **per-run override** (`StartRun.model_alias`, from the run dialog or `mta run --model`) — it is
+   recorded in that run's events and is never written to config;
+2. the agent's **model binding** — `[agents.model_bindings].<agent-name> = "<alias>"`, written by the
+   picker (`mta models set`) or by hand; model-only, so it never touches a prompt, tool policy, or budget;
+3. the agent definition's `model` (file or `[[agents.definitions]]`);
+4. otherwise the model is **unresolved**; with `[agents].inherit_model = true` (default) a child run
+   inherits the parent/root run's model, while a root run cannot start. With `inherit_model = false`,
+   the agent stays listed but cannot be launched, and `mta agents show` prints why.
+
+Each candidate is then resolved to a configured model profile:
 
 1. an exact `mta` model alias equal to the full string (`provider/model`);
 2. a `[[models]]` entry whose `provider` name and `model` id match (`providerID` = provider name,
    model id may itself contain `/`, which is why the split is on the **first** `/`);
-3. a `[[providers]]` entry whose name matches, with the model id used verbatim;
-4. otherwise the model is **unresolved**.
+3. a `[[providers]]` entry whose name matches, with the model id used verbatim — this is **discoverable
+   but not runnable**: it has no context window, pricing, or capability flags, so the picker opens the
+   profile form and `StartRun` is rejected until a `[[models]]` entry exists;
+4. otherwise the model is **unresolved** and `StartRun` is rejected.
 
 `#variant` is parsed and stored in the snapshot, then ignored with a warning (v0.1 has no variant
-routing).
+routing). A `systemone` model can only be chosen for `decision_model`; a `chat` model only for `model`.
+The wrong modality is a rejection, not a silent fallback.
 
-For an unresolved model: if `[agents].inherit_model = true` (default), the agent inherits the parent
-run's model and the picker/roster shows an "inherits model" badge. With `inherit_model = false`, the
-agent remains listed but cannot be launched, and `mta agents show` prints why. The engine never guesses
-a provider.
+`RunQueued.model_source` records the winning layer (`override | binding | definition | inherit`), and
+`mta agents show` prints `model: smart (binding)` with the definition value it shadows. A binding is
+**not** an agent definition: it is applied on top of the winning definition and cannot change anything
+except the model ([§6.1](#61-whole-definition-replace-not-field-merge),
+[ADR-0013](adr/0013-model-selection-and-search.md)).
 
-Explicit `mta` config wins: `[[agents.definitions]]` with the same `name` can override `model` (and any
-other field) regardless of the file's value.
+Explicit `mta` config wins over a file: `[[agents.definitions]]` with the same `name` can override any
+field regardless of the file's value; `[agents.model_bindings]` then overrides only its `model`. The
+picker never rewrites a `[[agents.definitions]]` array element to change a model, because a sparse entry
+would freeze the rest of the definition.
 
 ## 6. Merge, overrides, trust
 
@@ -293,6 +310,12 @@ explicit divergence (§9.4).
 Tombstones work across layers: a config entry with `disabled = true` removes an inherited file agent
 with that ID. Shadowing is reported by `mta agents list --all` (`shadowed by <path>`).
 
+**Model bindings are not definitions.** `[agents.model_bindings]` is a separate, model-only layer
+([§5](#5-model-resolution)). It is applied after whole-definition replace, cannot carry a prompt, tool
+policy, permission, or budget, and is therefore the only safe way for the picker to retarget a
+file-discovered agent. `AgentDefinitionReplaced` is not emitted for a binding; `ReloadConfig` emits
+`AgentModelBound`/`AgentModelUnbound` on a diff ([events.md §5.6](events.md#56-agents-agentid-and-skills-skillid)).
+
 ### 6.2 Effective catalogue record
 
 Discovered agent definitions are persisted in the existing `agents` table (extended in M5.5) with:
@@ -301,6 +324,7 @@ Discovered agent definitions are persisted in the existing `agents` table (exten
 - `source` = `opencode-global` | `opencode-project` | `agents-global` | `agents-project` | `config` | `db`
 - `source_path`, `source_hash` (sha256 of the raw file), `definition_json` (normalised spec + warnings)
 - `mode`, `tool_policy_json`, `last_seen_at`, `enabled`
+- `model_alias` (declared), `model_binding` (config override), `effective_model`, `model_source`
 
 Discovered skills are persisted in a `skills` projection with:
 
@@ -446,7 +470,11 @@ mta agents add|edit             # existing mta-managed agents; unrelated to file
 mta skills list [--all] [--json]   # convenience: `agents list --kind skill`
 mta skills show <id>            # description, body size, present resources, interface metadata, trust state
 mta skills trust <id>           # headless trust for the current project (prints file hash)
+mta models set <agent> <alias>  # write a model-only binding ([agents.model_bindings])
+mta models unset <agent>        # remove the binding; fall back to the definition / inherit
+mta models list --search <query>   # the same picker grammar, headless (ADR-0013)
 mta run <task-id> --skills <id,...>   # attach skills at run creation (§7.3)
+mta run <task-id> --model <alias>     # per-run override; never persisted
 ```
 
 `--source` accepts `opencode-global | opencode-project | agents-global | agents-project | config | db`.
@@ -455,7 +483,8 @@ mta run <task-id> --skills <id,...>   # attach skills at run creation (§7.3)
 
 - `A` opens the catalogue roster: kind, ID, mode (agents) or size (skills), model (with "inherits" badge),
   source, trust state, warnings, permission summary. Agents and skills are grouped by kind; `Enter`
-  inspects either without launching.
+  inspects either without launching. `M` from the board opens the searchable model picker; inside the
+  roster, `Enter` on an agent's model row does the same.
 - The assign picker groups mta-managed agents first, then file agents; untrusted project agents show a
   lock glyph and a one-line reason. **Skills never appear as delegation targets** — a skill is offered only
   in the run-start dialog's attach row, where an untrusted skill shows the same lock glyph and cannot be

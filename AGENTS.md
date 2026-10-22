@@ -97,6 +97,14 @@ code in the same change. `docs/events.md` is the interface other crates code aga
 - `skill` is a separate kind: listed with provenance, attachable as context, and never selectable as the
   executor; `delegate` must refuse a skill id.
 
+**Config writes are a single, checked path.** The TUI and CLI never rewrite TOML directly. A model
+selection, binding, or new `[[models]]` profile goes through the engine's `ConfigEditor`:
+comment-preserving `toml_edit`, validate before write, atomic temp+rename, one `.bak`, and a hash check
+that aborts if the file changed since the picker opened; a failed `ReloadConfig` restores the backup.
+A decider must never write a file, and a config write must never include a secret. A selection is a
+model-only `[agents.model_bindings]` entry — never a sparse `[[agents.definitions]]` entry, which would
+freeze the rest of the definition ([ADR-0013](docs/adr/0013-model-selection-and-search.md)).
+
 ## 6. Diagnostics and secrets
 
 - Events answer "what happened"; logs answer "what was it doing". Do not mix them: no `LogEmitted` event,

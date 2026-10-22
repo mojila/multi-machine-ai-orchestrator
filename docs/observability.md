@@ -142,6 +142,7 @@ Spans (nesting mirrors the architecture):
 | `provider` | `provider`, `model`, `stream` | one chat or decision request |
 | `tool` | `name`, `argv_len`, `pid` | one tool invocation |
 | `catalog_scan` | `scan_id`, `roots`, `kind` | one `ScanCatalogs` pass |
+| `model_catalogue` | `provider`, `discovered`, `cached`, `duration_ms`, `outcome` | one live `GET /models` refresh (never per keystroke; no header or key field) |
 | `estimate` | `task_id`, `source`, `estimator_version`, `samples`, `confidence` | one `EstimateTask` pass (heuristic, calibration, refinement) |
 | `projection` | `name`, `from_seq`, `to_seq` | one projection advance |
 | `deadline` | `deadline_id`, `kind`, `due_at`, `late_ms` | one `FireDeadline` → `DeadlineReached` |
@@ -153,6 +154,11 @@ Estimation records add `estimate_minutes`, `estimate_source`, `estimator_version
 estimate to the card, and the task text stays in the event log where it belongs).
 `json`
 format emits these as structured fields so `jq` works; `human` prints them as a suffix.
+
+Model-catalogue records carry the provider name, the number of ids returned, and whether the cache was
+used; they never carry the request's `Authorization` header, an API key, or prompt text. Model ids are
+not secrets. A picker config write is logged at `info` as `path`, `changed_keys` count, and `outcome`
+only — never the file body, which may contain unrelated configuration.
 
 ## 5. Redaction: secrets never reach a record
 

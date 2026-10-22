@@ -121,6 +121,13 @@ Rules:
 - **Estimation adds no dependency.** The effort heuristic and the EWMA calibration are plain
   integer/float arithmetic in `mta-domain` ([ADR-0012](adr/0012-task-estimation.md)); there is no
   statistics or ML crate to link, and the release budget is unaffected.
+- **Config editing adds one small crate.** `toml_edit = "=0.25.17+spec-1.1.0"` (MIT OR Apache-2.0,
+  `rust-version = 1.85`, checked against crates.io) is used by the engine's `ConfigEditor` to preserve a
+  user's comments and ordering when the model picker writes a binding or appends a `[[models]]` profile
+  ([ADR-0013](adr/0013-model-selection-and-search.md)). It is a parser/writer, not an I/O stack, and sits
+  comfortably under the 1.94 MSRV. The model-query parser is hand-written (no regex crate). The release
+  budget is expected to absorb it; M6 measures the real binary and tightens `size-budget.toml` only with
+  a recorded measurement.
 - `mta-testkit` (log capture for tests) is a dev-only member and is **outside** the budget: the budget
   covers the shipped `mta` binary, and a capture helper that never links into it cannot affect it.
 - `cargo bloat --release --crates` is the diagnostic when the budget is breached; record the finding in

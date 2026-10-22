@@ -319,8 +319,9 @@ the consumer list. Payload fields are listed per group under "Payloads".
 
 **Payloads**
 
-- `RunQueued` — `task_id`, `agent_id`, `trigger`, `model_alias`, `budget`, `skill_ids[]`,
-  `parent_run_id?`, `depth`.
+- `RunQueued` — `task_id`, `agent_id`, `trigger`, `model_alias`, `model_source`, `budget`, `skill_ids[]`,
+  `parent_run_id?`, `depth`. `model_source` is `override | binding | definition | inherit`; an
+  `override` came from `StartRun.model_alias` and exists only in this run's events, never in config.
 - `RunStarted` — `workspace_path`, `model_alias`, `attached_skills[]` (each `{id, source_hash, body}`;
   see §5.6 and [agents.md §7.3](agents.md#73-skill-attachment)); the bodies travel in the event for
   the same reason `agent_snapshot_json` does — a replay must not depend on a file still existing or still
@@ -443,6 +444,8 @@ never a delegation target ([agents.md §2.2](agents.md#22-why-skills-are-not-age
 | `AgentChanged` | agent | update hash + diff → agents | `ScanCatalogs` → TUI |
 | `AgentUnavailable` | agent | mark unavailable → agents | `ScanCatalogs` → TUI |
 | `AgentDefinitionReplaced` | agent | replace/tombstone → agents | ReloadConfig → TUI |
+| `AgentModelBound` | agent | set model-only binding → agents | ReloadConfig → TUI, scheduler |
+| `AgentModelUnbound` | agent | clear binding → agents | ReloadConfig → TUI, scheduler |
 | `AgentTrustRequested` | agent | insert pending trust → agents,deadlines | `AdvanceRun` (delegation gate) → TUI |
 | `AgentTrusted` | agent | record trust by hash → agents | TrustAgent → scheduler |
 | `AgentTrustRevoked` | agent | drop trust → agents | RevokeAgentTrust → scheduler |
@@ -458,6 +461,10 @@ never a delegation target ([agents.md §2.2](agents.md#22-why-skills-are-not-age
 - `AgentChanged` — `source_hash`, `diff_summary`.
 - `AgentUnavailable` — `path`, `reason`.
 - `AgentDefinitionReplaced` — `definition_ref`, `disabled`.
+- `AgentModelBound` — `model_alias`, `origin = "config"`, `config_hash`; a **model-only** binding from
+  `[agents.model_bindings]`, not a definition (it carries no prompt, tools, or permissions). Emitted by
+  `ReloadConfig` only when the binding differs from the projected value.
+- `AgentModelUnbound` — `reason`, `config_hash`; the entry was removed or the agent was tombstoned.
 - `AgentTrustRequested` — `source_hash`, `project`, `prompt_excerpt`.
 - `AgentTrusted` — `source_hash`, `project`, `by`.
 - `AgentTrustRevoked` — `project`, `reason`.
@@ -574,7 +581,7 @@ command either produces a validated event set or is rejected; it never writes a 
 | `ClearTaskEstimate` | TUI, CLI → task | TaskEstimateCleared | no estimate |
 | `RecordTaskEffort` | TUI, CLI → task | TaskEffortRecorded | unknown task, non-positive actual |
 | `AddDependency` | TUI, engine → task | TaskDependencyAdded | cycle, self-dep |
-| `StartRun` | TUI,scheduler → run | RunQueued, RunBudgetReserved | active root run, budget, unknown/untrusted skill or skill hash mismatch |
+| `StartRun` | TUI,scheduler → run | RunQueued, RunBudgetReserved | active root run, budget, unknown/untrusted skill or skill hash mismatch, unknown/unprofiled model alias or wrong modality |
 | `TrustSkill` | TUI, CLI → skill | SkillTrusted | unknown skill, hash changed |
 | `RevokeSkillTrust` | TUI, CLI → skill | SkillTrustRevoked | no such trust |
 | `ScanCatalogs` | bootstrap, CLI, watcher → agent, skill | Agent*/Skill* discovery events | no root changed since the last scan |
@@ -585,7 +592,7 @@ command either produces a validated event set or is rejected; it never writes a 
 | `DenyApproval` | TUI,CLI → run | ApprovalDecided, RunFailed | not pending |
 | `TrustAgent` | TUI, CLI → agent | AgentTrusted | unknown agent, hash changed |
 | `RevokeAgentTrust` | TUI, CLI → agent | AgentTrustRevoked | no such trust |
-| `ReloadConfig` | engine → system | ConfigReloaded (+agent diffs) | invalid config |
+| `ReloadConfig` | engine → system, agent | ConfigReloaded (+agent diffs, `AgentModelBound`/`AgentModelUnbound`) | invalid config |
 | `RegisterSchedule` | CLI,config → schedule | ScheduleRegistered (+Due) | bad cron/dup |
 | `DisableSchedule` | TUI, CLI → schedule | ScheduleDisabled | already disabled |
 | `BeginRun` | engine → run | RunStarted | not queued, budget, no slot |
@@ -642,6 +649,15 @@ might change an estimate without turning those events into log noise, and an idl
 re-runs the heuristic and never calls a decision model; `estimator_version` records which formula produced
 it. This is the same rule as `ScanCatalogs`: discovery and estimation are effects that propose a diff, and
 the decider decides whether there is anything new to write.
+
+**A model binding is a config diff, not a definition.** `[agents.model_bindings]` is a model-only layer
+([agents.md §5](agents.md#5-model-resolution), [ADR-0013](adr/0013-model-selection-and-search.md)): it
+cannot carry a prompt, tools, or permissions, so applying it to a file-discovered agent is safe and does
+not trigger `AgentDefinitionReplaced` (which would replace the whole definition). The engine's
+`ConfigEditor` writes the file atomically and submits `ReloadConfig`; that decider compares each
+binding with the `agents` projection and appends `AgentModelBound`/`AgentModelUnbound` only on a real
+diff. An identical reload appends nothing. A selection made in the picker and a hand edit of the same
+file therefore produce the same events, and neither is a side channel into the log.
 
 **The external-facts rule.** An HTTP reply, a tool's exit status, or a timer firing **arrives as
 a command** (`RecordLlmResult`, `RecordToolResult`, `FireDeadline`) and is validated by the
@@ -755,7 +771,7 @@ status line shows it because a stale offset and a UI bug look identical from out
 | `messages` | transcript | MessageAppended | `content_ref` resolved at read |
 | `approvals` | pending/decided approvals | approval events | one pending per step |
 | `decisions` | Jev calls, answers, outcomes | decision events | advisory; `applied`/`outcome` |
-| `agents` | roster + trust + provenance | agent events | source, hash, effective policy |
+| `agents` | roster + trust + provenance | agent events | source, hash, effective policy, `model_binding`, `effective_model`, `model_source` (ADR-0013) |
 | `skills` | attachable skills + trust + resource names | skill events | never a delegation target; `references/` contents not stored |
 | `budgets` | day reservations and spend | budget/usage events | integer micro-USD |
 | `schedules` | cron registrations, last fire | schedule events | dedup `(name, local_date)` |
@@ -903,6 +919,10 @@ replays to a known board, and any behaviour change must update the fixture delib
 | estimate replay needs no estimator | estimates are facts, not derived fields | replay/rebuild `tasks` with the estimator and Jev disabled; assert identical values |
 | calibration rebuild ignores config | EWMA constants are code, not config | rebuild `estimate_accuracy` under a different `[estimation]` block; assert identical rows |
 | attached skill text survives a file edit | prompt inputs are in the log, not on disk | attach, edit `SKILL.md`, replay; assert the run's prompt is byte-identical and `SkillChanged` is a separate stream fact |
+| model binding reload is a diff | config reloads are idempotent | bind `ops = "smart"`, reload twice; assert one `AgentModelBound` and an empty second set; remove it and assert one `AgentModelUnbound` |
+| per-run model override is not persisted | an override is a run fact, not a preference | start with `StartRun.model_alias`, replay, assert `RunQueued.model_source = "override"` and the `agents` binding is unchanged |
+| unknown/unprofiled model is rejected | a run always has a known context window and price | submit `StartRun` with an alias absent from `[[models]]`; assert `CommandRejected` and no `RunQueued` |
+| replay reproduces the effective model | resolution is deterministic | rebuild `agents`/`runs`; assert `effective_model` and `model_source` are byte-identical to the live rows |
 
 ## 15. Open questions
 
@@ -926,6 +946,7 @@ Decisions taken while writing this document are recorded first; genuinely undeci
 | Do host metrics (CPU/RAM/disk) belong in the log? | **No.** Samples are ephemeral (§2.1) because they are not reproducible and a log carrying them would replay differently on every machine. The single logged form is the opt-in, debounced `HostPressureObserved` **crossing**: a threshold being crossed is a durable, explainable fact, whereas a reading is a transient measurement. |
 | Are diagnostic logs events? | **No — a separate record with a separate lifetime** (§2.2). `tracing` records are ephemeral, never replayed, never read by the engine, and bounded by log rotation rather than by retention; there is no `LogEmitted` event and no `logs` table. They carry the ids that join them to events, which is the only intended connection between the two. |
 | Are task estimates events or a derived field? | **Events** — `TaskEstimated`/`TaskEstimateCleared`/`TaskEffortRecorded` on `task:<id>`. An estimate is a planning fact with provenance and confidence; recomputing it at render time would change under the user, make the header disagree with a replay, and leave no audit trail for a manual pin. The heuristic is pure, but its *result* is stored, so a rebuild never needs the estimator or a decision model. Idempotence is by `inputs_hash`, not by a timer. |
+| Is the live model catalogue in the log? | **No.** `GET /models` results are ephemeral provider metadata (like host samples): non-reproducible, carrying no context window, price, or capabilities, and meaningless to replay. The durable facts are the `[[models]]` profiles in config and the per-agent `[agents.model_bindings]`; the latter become `AgentModelBound`/`AgentModelUnbound` through `ReloadConfig`'s diff. The picker's search and discovery are view-model data, never events ([ADR-0013](adr/0013-model-selection-and-search.md)). |
 
 ### 15.2 Still open
 
