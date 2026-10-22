@@ -15,6 +15,8 @@ configurable agents, executed against any OpenAI-compatible provider, and review
 - [Sub-agents & skills](docs/agents.md) — reuse `.opencode/agents/*.md` and `.agents/` agents as
   delegation targets, and attach `.agents/skills/*/SKILL.md` as context (no OpenCode runtime required)
 - [Build hygiene](docs/build.md) — bounded `target/`, profiles, size budgets, prune commands
+- [Diagnostics](docs/observability.md) — events vs logs, level policy, sinks, redaction, correlation
+  spans, rotation, support bundle
 - [Architecture decision records](docs/adr/) — [0001 workspace](docs/adr/0001-workspace.md),
   [0002 version pinning](docs/adr/0002-version-pinning.md),
   [0003 engine owns store](docs/adr/0003-engine-owns-store.md),
@@ -24,7 +26,9 @@ configurable agents, executed against any OpenAI-compatible provider, and review
   [0007 context compaction](docs/adr/0007-context-compaction.md),
   [0008 mouse hit map](docs/adr/0008-mouse-hit-map.md),
   [0009 event-sourced core](docs/adr/0009-event-sourced-core.md),
-  [0010 agent and skill discovery](docs/adr/0010-agent-and-skill-discovery.md)
+  [0010 agent and skill discovery](docs/adr/0010-agent-and-skill-discovery.md),
+  [0011 diagnostics](docs/adr/0011-observability-and-diagnostics.md),
+  [0012 task estimation](docs/adr/0012-task-estimation.md)
 
 ## Intended shape
 
@@ -56,7 +60,16 @@ fully keyboard-driven, with mouse click, wheel, and scrollbar drag mapping onto 
 actions — no mouse-only capability, and capture is restored if the process crashes. The status
 line carries live machine health (CPU, RAM, disk), with `S` for full detail — deliberately outside
 the event log, because a snapshot of free memory is not reproducible and has no business in an
-auditable log. Multi-machine execution (daemon + workers) is deliberately deferred to v0.2;
+auditable log. Debug output follows the same split from the other side: `tracing` records go to
+rotating files and a TUI overlay, are never replayed, and carry the ids that join a log line back to
+the event that caused it — so a failing run is diagnosable without polluting the record that is the
+source of truth, and no secret or prompt body reaches a file without an explicit opt-in.
+Every card also carries an automatic effort estimate (human hours) and an optional run forecast
+(wall-clock and cost for the assigned agent); the header and each column show open-effort subtotals, and
+`T` opens a forecast overlay with throughput and a projected finish. Estimates are events too — with
+provenance, confidence, and a manual pin — so a rebuild reproduces the board exactly, and the heuristic
+works offline while Jev adds a bounded refinement only when the card is ambiguous.
+Multi-machine execution (daemon + workers) is deliberately deferred to v0.2;
 replicating the event log is the intended protocol, and the crate boundaries are designed for it.
 
 ## Next step

@@ -6,6 +6,7 @@
 - **Related:** [ADR-0003 engine owns store](0003-engine-owns-store.md),
   [ADR-0006 OpenCode sub-agents](0006-opencode-subagents.md),
   [ADR-0007 context compaction](0007-context-compaction.md),
+  [ADR-0011 diagnostics](0011-observability-and-diagnostics.md),
   [docs/events.md](../events.md), [PLAN.md §3.1](../PLAN.md#31-runtime-shape)
 
 ## Context

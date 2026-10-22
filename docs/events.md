@@ -74,6 +74,34 @@ rule for a stronger reason: a machine's instantaneous CPU or free memory is not 
 an event carrying it would make replay non-deterministic. **Replaying a log never reads the
 host**, and a projection rebuilt on a different machine is byte-identical.
 
+### 2.2 Diagnostic logs are not events
+
+The ephemeral table above covers state that exists to be *drawn*. There is a second class that is
+easy to confuse with the log because it is also written to disk: the **diagnostic log** —
+`tracing` records with levels, targets, and fields, written to a rotating file and a terminal
+([observability.md](observability.md), [ADR-0011](adr/0011-observability-and-diagnostics.md)).
+
+| | Event log | Diagnostic log |
+|---|---|---|
+| Authority | source of truth; projections rebuild from it | never authoritative; the engine never reads it |
+| Replay | replayed by `mta replay`/`projections rebuild` | never replayed, never parsed |
+| Content | validated payloads; the deterministic facts | durations, retry attempts, HTTP status codes, estimator inputs |
+| Loss | changes state | changes nothing |
+
+Two rules keep them apart:
+
+1. **If a fact must survive a restart, it is an event.** A log line may quote `seq`, `command_id`, or
+   `causation_id`, but it never substitutes for one — which is why there is no `LogEmitted` event and no
+   `logs` table. Making diagnostics replayable would put dependency chatter in the audit trail and put
+   library versions into the deterministic fold.
+2. **A decider may not log.** `decide` is I/O-free so replay is deterministic (§4); `mta-domain`
+   therefore has no `tracing` dependency at all, and the processor records the decider's structured
+   `Rejection` and the enclosing span from the outside (observability.md §7).
+
+The one place the two meet is correlation: every record carries the ids of the command, stream, and run
+it describes, so `grep <run_id>` over the file log and `mta events show <event_id>` over the log are two
+views of one causal chain rather than two unrelated stories.
+
 ## 3. Event envelope
 
 Every event, on every stream, has exactly this envelope. It is the only durable record of a
@@ -203,7 +231,9 @@ no network. Ids and timestamps are chosen by the command issuer and stored in th
 replaying the same command against the same state always yields the same events. Anything that
 cannot be pure is an **effect**: it runs outside `decide`, observes events, and returns its
 result as a new command. A single `Utc::now()`, a `rand::random()`, or a `sqlx::query` inside a
-decider silently breaks replay determinism; this is enforced by lint and by the tests in §14.
+decider silently breaks replay determinism; this is enforced by lint and by the tests in §14. A
+log call is also I/O, so a decider does not log either: `mta-domain` does not depend on `tracing`,
+and the processor records the decider's returned `Rejection` from the outside (§2.2).
 
 **External facts arrive as commands.** An HTTP reply, a tool's exit status, or a timer firing is
 not appended directly. It is wrapped in a command (`RecordLlmResult`, `RecordToolResult`,
@@ -235,6 +265,9 @@ the consumer list. Payload fields are listed per group under "Payloads".
 | `TaskDependencyAdded` | task | add edge → tasks | AddDependency → scheduler |
 | `TaskDependencyRemoved` | task | drop edge → tasks | decider → scheduler |
 | `TaskFeedbackAdded` | task | append feedback → tasks | AddFeedback → scheduler |
+| `TaskEstimated` | task | set estimate fields → tasks | EstimateTask/SetTaskEstimate → TUI,digest |
+| `TaskEstimateCleared` | task | null the estimate → tasks | ClearTaskEstimate → TUI,digest |
+| `TaskEffortRecorded` | task | record an actual → task_effort,estimate_accuracy | RecordTaskEffort → estimate effect,digests |
 | `TaskCompleted` | task | lane = done → tasks | MoveTask → TUI |
 | `TaskReopened` | task | lane = todo → tasks | decider → scheduler,TUI |
 | `TaskDeleted` | task | remove card → tasks,search | DeleteTask → TUI |
@@ -253,6 +286,14 @@ the consumer list. Payload fields are listed per group under "Payloads".
 - `TaskDependencyAdded` — `depends_on`.
 - `TaskDependencyRemoved` — `depends_on`.
 - `TaskFeedbackAdded` — `text`, `run_id?`.
+- `TaskEstimated` — `estimate_minutes`, `run_forecast?` (`{duration_ms, cost_micro_usd}`), `confidence`,
+  `source` ∈ {`heuristic`, `learned`, `decision`, `user`}, `estimator_version`, `inputs_hash`, and
+  `evidence` (`{decision_id?, samples?, throughput_minutes_per_day?}`). `inputs_hash` is the
+  idempotency key for an automatic estimate; a repeat with the same hash is rejected as a no-op.
+- `TaskEstimateCleared` — `reason` (`user` | `reopened`).
+- `TaskEffortRecorded` — `actual_minutes`, `estimate_minutes` (the value in force when the actual was
+  recorded), `tags[]`, `agent_id?`, `source` (`user`), `note?`. The snapshot of `estimate_minutes` is
+  what makes the calibration fold independent of fold order and of later edits.
 - `TaskCompleted` — `run_id?`.
 - `TaskReopened` — `run_id`.
 - `TaskDeleted` — `reason`.
@@ -368,8 +409,8 @@ An approval is the only suspension point in the run state machine ([PLAN.md
 
 A decision is one typed question set asked of a decision model (Jev / System One) and its
 answers. It is advisory unless a configured policy applies it. It is an event on the stream it
-belongs to: a `decide` call inside a run lives on `run:<id>`; an `auto_assign`, `spec_gate`, or
-`priority` decision lives on `task:<id>`. The exact owning stream for engine-policy decisions is
+belongs to: a `decide` call inside a run lives on `run:<id>`; an `auto_assign`, `spec_gate`, `priority`, or
+`task_estimate` decision lives on `task:<id>`. The exact owning stream for engine-policy decisions is
 a documented choice, not a new stream (§3.1).
 
 | type | stream | fold → projections | producer → consumers |
@@ -521,13 +562,17 @@ command either produces a validated event set or is rejected; it never writes a 
 
 | command | issuer → stream | may append | rejected when |
 |---|---|---|---|
-| `AddTask` | TUI, CLI → task | TaskCreated | board/column missing, WIP |
+| `AddTask` | TUI, CLI → task | TaskCreated (+ TaskEstimated when `--estimate` is given) | board/column missing, WIP, invalid estimate |
 | `EditTask` | TUI, CLI → task | TaskEdited | unknown field, stale version |
 | `MoveTask` | TUI, engine → task | TaskMoved (+Completed/Reopened) | illegal transition |
 | `ReorderTask` | TUI → task | TaskReordered | stale position |
 | `AssignTask` | TUI, engine → task | TaskAssigned | unknown/ineligible agent |
 | `DeleteTask` | TUI, CLI → task | TaskDeleted | active root run |
 | `AddFeedback` | TUI, engine → task | TaskFeedbackAdded | — |
+| `EstimateTask` | effect, TUI, CLI → task | TaskEstimated (+ `DecisionRequested` when refining) | unknown/deleted task, user-pinned estimate, unchanged `inputs_hash`, stale version |
+| `SetTaskEstimate` | TUI, CLI → task | TaskEstimated | unknown task, out of `[min,max]`, stale version |
+| `ClearTaskEstimate` | TUI, CLI → task | TaskEstimateCleared | no estimate |
+| `RecordTaskEffort` | TUI, CLI → task | TaskEffortRecorded | unknown task, non-positive actual |
 | `AddDependency` | TUI, engine → task | TaskDependencyAdded | cycle, self-dep |
 | `StartRun` | TUI,scheduler → run | RunQueued, RunBudgetReserved | active root run, budget, unknown/untrusted skill or skill hash mismatch |
 | `TrustSkill` | TUI, CLI → skill | SkillTrusted | unknown skill, hash changed |
@@ -589,6 +634,15 @@ command. A scan that finds nothing new is a no-op and appends nothing, so a dire
 repeatedly cannot flood the log. `ScanCatalogs` is also the only command that targets two streams: its
 `may append` column lists both, and each event still lands on the stream of the entry it is about.
 
+**Estimation is diff-based, not a sweep.** `EstimateTask` compares `inputs_hash` with the current estimate
+inside `decide`; an unchanged card appends nothing. The effect can therefore subscribe to every event that
+might change an estimate without turning those events into log noise, and an idle board stays idle. A
+`source = user` estimate is sticky: only `SetTaskEstimate`, `ClearTaskEstimate`, or an explicit
+`EstimateTask{force_auto: true}` may replace it. The value is always stored in the event, so a replay never
+re-runs the heuristic and never calls a decision model; `estimator_version` records which formula produced
+it. This is the same rule as `ScanCatalogs`: discovery and estimation are effects that propose a diff, and
+the decider decides whether there is anything new to write.
+
 **The external-facts rule.** An HTTP reply, a tool's exit status, or a timer firing **arrives as
 a command** (`RecordLlmResult`, `RecordToolResult`, `FireDeadline`) and is validated by the
 decider before any event is appended. An effect never appends an event directly; it appends a
@@ -615,6 +669,7 @@ work and appending the result command causes the effect to be re-issued after re
 | `SummariseContext` | CompactRun | summarise an old span | RecordLlmResult | fallback |
 | `WriteArtifact` | RunSucceeded | persist + hash files | folded next run event | path+hash |
 | `ComputeDigest` | DigestRequested | render Markdown | DigestCompleted/Failed | fallback; cancel |
+| `EstimateTask` | TaskCreated/Edited, TaskAssigned/Unassigned, TaskDependency*, TaskEffortRecorded, terminal run events, `DecisionAnswered` (purpose=task_estimate), EngineStarted (backfill) | compute the heuristic + calibration bucket; optionally request a Jev refinement | `EstimateTask` (+ `DecisionRequested` when refining) | idempotent by `inputs_hash`; no sweep, no retry storm |
 | `ScanCatalogs` | EngineStarted, ConfigReloaded, fs watcher | read the discovery roots in §5.6 | `ScanCatalogs` | re-issued on restart; the diff makes it idempotent |
 
 **Idempotency key = the `command_id` of the originating command.** Each effect derives its
@@ -671,6 +726,7 @@ changing behaviour. Polling was **removed, not reduced** ([ADR-0009
 | No projection writes outside the projector | structure: the projector holds the write handle |
 | Aggregate = snapshot + tail | structure: fold snapshot, then events after it |
 | External facts cannot append unvalidated | structure: deciders are the only appenders |
+| Estimation is idempotent and replayable | decider: an unchanged `inputs_hash` appends nothing; the value lives in `TaskEstimated`, so a replay never recomputes it |
 
 **Optimistic concurrency.** The concurrency token is the stream version. To append, a decider
 supplies the version it loaded; the append succeeds only if that is still the stream's current
@@ -692,7 +748,8 @@ status line shows it because a stale offset and a UI bug look identical from out
 | projection | purpose | primary source events | notes |
 |---|---|---|---|
 | `board` | columns, order, WIP, priority | Board*, TaskMoved | small; instant rebuild |
-| `tasks` | the kanban cards | Task* events | card list; ordering renormalised on fold |
+| `tasks` | the kanban cards | Task* events | card list + current estimate; ordering renormalised on fold |
+| `task_effort` | recorded actuals | TaskEffortRecorded | one row per recording; carries the estimate snapshot |
 | `runs` | run status, totals, linkage | run life-cycle events | one row per run |
 | `steps` | the audit/step rows | step events | includes compaction and subagent steps |
 | `messages` | transcript | MessageAppended | `content_ref` resolved at read |
@@ -704,6 +761,7 @@ status line shows it because a stale offset and a UI bug look identical from out
 | `schedules` | cron registrations, last fire | schedule events | dedup `(name, local_date)` |
 | `deadlines` | the timer wheel's read model | deadline-arming events | earliest due is the arm |
 | `run_costs` | per-step cost rollup | RunUsageRecorded, SubagentCompleted | sums to run totals |
+| `estimate_accuracy` | calibration buckets + run forecast | TaskEffortRecorded, run terminal events | fixed EWMA constants, not config, so a rebuild is byte-identical |
 | `search` | FTS over tasks and messages | Task*, MessageAppended | external-content FTS5 |
 | `digests` | produced digest artefacts | DigestRequested/Completed/Failed | path + fallback flag |
 
@@ -841,6 +899,9 @@ replays to a known board, and any behaviour change must update the fixture delib
 | GC below the watermark | pruning is transparent | prune, rebuild, diff |
 | golden fixture log | the system replays to a known board | `mta replay --dry-run` |
 | idle scan appends nothing | discovery is diff-based, not a poll | submit `ScanCatalogs` twice unchanged; assert the second set is empty |
+| idle estimate appends nothing | estimation is event-driven, not a poll | submit `EstimateTask` twice with the same `inputs_hash`; assert the second set is empty |
+| estimate replay needs no estimator | estimates are facts, not derived fields | replay/rebuild `tasks` with the estimator and Jev disabled; assert identical values |
+| calibration rebuild ignores config | EWMA constants are code, not config | rebuild `estimate_accuracy` under a different `[estimation]` block; assert identical rows |
 | attached skill text survives a file edit | prompt inputs are in the log, not on disk | attach, edit `SKILL.md`, replay; assert the run's prompt is byte-identical and `SkillChanged` is a separate stream fact |
 
 ## 15. Open questions
@@ -863,6 +924,8 @@ Decisions taken while writing this document are recorded first; genuinely undeci
 | `schedule:<id>` derivation | **A surrogate ULID.** `name` is unique and human-facing; renaming a schedule is `ScheduleDisabled` + `ScheduleRegistered` on the same stream (or an added `ScheduleRenamed` when it earns its keep), never a new stream. |
 | `RunSuspended` vs `ApprovalRequested` | **Both stay.** `ApprovalRequested` is the request; `RunSuspended` is the run's state change, and the pair keeps the run state machine readable without joining to the approvals projection. They are appended by the same command. |
 | Do host metrics (CPU/RAM/disk) belong in the log? | **No.** Samples are ephemeral (§2.1) because they are not reproducible and a log carrying them would replay differently on every machine. The single logged form is the opt-in, debounced `HostPressureObserved` **crossing**: a threshold being crossed is a durable, explainable fact, whereas a reading is a transient measurement. |
+| Are diagnostic logs events? | **No — a separate record with a separate lifetime** (§2.2). `tracing` records are ephemeral, never replayed, never read by the engine, and bounded by log rotation rather than by retention; there is no `LogEmitted` event and no `logs` table. They carry the ids that join them to events, which is the only intended connection between the two. |
+| Are task estimates events or a derived field? | **Events** — `TaskEstimated`/`TaskEstimateCleared`/`TaskEffortRecorded` on `task:<id>`. An estimate is a planning fact with provenance and confidence; recomputing it at render time would change under the user, make the header disagree with a replay, and leave no audit trail for a manual pin. The heuristic is pure, but its *result* is stored, so a rebuild never needs the estimator or a decision model. Idempotence is by `inputs_hash`, not by a timer. |
 
 ### 15.2 Still open
 

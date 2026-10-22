@@ -3,6 +3,12 @@
 #
 # Values are MiB. These are placeholders with headroom — calibrate them in M1
 # once the workspace builds for real, then tighten in M6 before v0.1.
+#
+# The shipped binary budget covers `mta` only: `mta-testkit` is a dev-only member
+# (log capture for tests) and never links into it, so it is out of scope here.
+# The diagnostics stack (tracing 0.1.44 / tracing-subscriber 0.3.23 with no
+# `env-filter` / tracing-appender 0.2.5) is measured in M0 and booked against
+# release_mta_mb rather than guessed; see docs/observability.md and ADR-0011.
 
 [target]
 # Whole `target/` directory after a normal dev + test + release build.

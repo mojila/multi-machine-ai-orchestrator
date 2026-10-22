@@ -3,7 +3,8 @@
 - **Status:** Proposed
 - **Date:** 2026-10-21
 - **Deciders:** project owner
-- **Related:** [PLAN.md §3.2](../PLAN.md#32-workspace-layout)
+- **Related:** [PLAN.md §3.2](../PLAN.md#32-workspace-layout),
+  [ADR-0011 diagnostics](0011-observability-and-diagnostics.md)
 
 ## Context
 
@@ -29,6 +30,11 @@ The dependency set is young and moves quickly:
 - Pin `sysinfo = "=0.38.4"` (MSRV 1.88) rather than 0.39.x (MSRV 1.95). Taking 0.39+ is an explicit
   trigger to bump `rust-version` **and** `rust-toolchain.toml` in one deliberate change, not a
   side effect of a dependency refresh.
+- Pin the diagnostics stack exactly: `tracing = "=0.1.44"`, `tracing-subscriber = "=0.3.23"`
+  (`default-features = false`; features `std`, `fmt`, `ansi`, `json`, `tracing-log`), and
+  `tracing-appender = "=0.2.5"`. Their declared MSRVs (1.65, 1.65, 1.63) were verified against crates.io
+  metadata before pinning rather than assumed — the check that would have caught the `sysinfo` trap
+  earlier. `env-filter` is not enabled; see [ADR-0011](0011-observability-and-diagnostics.md).
 - Fail CI on duplicate terminal crates with `cargo tree -d`.
 - Upgrade only via a dedicated PR with snapshots re-baselined and an ADR amendment when a breaking
   change is accepted.

@@ -17,9 +17,11 @@ consequences, with alternatives considered.
 | [0008](0008-mouse-hit-map.md) | Pointer input via a render-time hit map, with strict keyboard parity | Proposed (M2) |
 | [0009](0009-event-sourced-core.md) | Event-sourced core: the append-only log is the source of truth | Proposed (M1) |
 | [0010](0010-agent-and-skill-discovery.md) | Discover agents and skills from multiple roots, with skills as a separate kind | Proposed (M5.5) |
+| [0011](0011-observability-and-diagnostics.md) | Structured diagnostics with `tracing`, kept separate from the event log | Proposed (M0) |
+| [0012](0012-task-estimation.md) | Event-sourced auto-estimation: heuristic, calibration, optional Jev refinement | Proposed (M2) |
 
 ADRs 0001–0003 are scheduled as deliverables of milestone M0 (see
-[PLAN.md](../PLAN.md#m0--bootstrap-1-day)); ADR-0004 is drafted with the provider design and accepted
+[PLAN.md](../PLAN.md#m0--bootstrap-2-days)); ADR-0004 is drafted with the provider design and accepted
 in M3; ADR-0005 is accepted in M0; ADR-0006 is accepted in M5.5; ADR-0007 is accepted in M5; ADR-0008 is
 accepted in M2; ADR-0009 is accepted in M1, together with its contract document
 [events.md](../events.md). ADR-0010 extends ADR-0006's discovery roots and is accepted in M5.5. They are
@@ -27,6 +29,11 @@ listed here so the numbering is reserved.
 
 ADR-0003's rule that the engine owns the store and the UI never touches the database stands;
 ADR-0009 amends the part of it that made SQLite tables (rather than the event log) the source of truth.
+ADR-0011 adds the diagnostics half of the observability story (the event log is the audit trail; a
+`tracing` log is not) and is accepted in M0 with its contract in [observability.md](../observability.md).
+ADR-0012 makes task estimates event-sourced facts rather than derived UI values: the heuristic and the
+event/command contract land in M2, the forecast overlay in M6, and calibration plus the optional Jev
+refinement in M7.
 
 ## Rules
 

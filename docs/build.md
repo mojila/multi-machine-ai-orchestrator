@@ -112,7 +112,17 @@ Rules:
 - Budget is enforced for the shipped `mta` binary only (test binaries are dev-only).
 - `strip = "debuginfo"`, not `"symbols"`: panic messages stay readable, budget accounts for it.
 - Feature discipline is the other half of binary size: trimmed `reqwest` features, no `tokio` `full`,
-  minimal `clap`/`tracing` features, `[workspace.dependencies]` for one version per crate.
+  minimal `clap` features, and `tracing` with the feature set chosen rather than defaulted:
+  `tracing-subscriber` is taken with `default-features = false` and only
+  `std`, `fmt`, `ansi`, `json`, `tracing-log`. **`env-filter` is deliberately excluded** — it pulls
+  `regex-automata` + `matchers` (the largest single component of a typical `tracing` stack) to parse a
+  grammar that is `target=level` pairs, which `mta` parses itself
+  ([observability.md](observability.md) §3). `[workspace.dependencies]` keeps one version per crate.
+- **Estimation adds no dependency.** The effort heuristic and the EWMA calibration are plain
+  integer/float arithmetic in `mta-domain` ([ADR-0012](adr/0012-task-estimation.md)); there is no
+  statistics or ML crate to link, and the release budget is unaffected.
+- `mta-testkit` (log capture for tests) is a dev-only member and is **outside** the budget: the budget
+  covers the shipped `mta` binary, and a capture helper that never links into it cannot affect it.
 - `cargo bloat --release --crates` is the diagnostic when the budget is breached; record the finding in
   an ADR or the release notes rather than silently raising the budget.
 
@@ -132,6 +142,12 @@ Rules:
 - `debug = "line-tables-only"` is a valid Cargo profile value; `[profile.dev.package."*"] debug = false`
   applies the override to all dependency packages.
 - `strip = "debuginfo"` keeps the symbol table; `strip = "symbols"` would remove it.
+- The diagnostics stack was checked against crates.io metadata, not assumed: `tracing` 0.1.44 (MSRV
+  1.65), `tracing-subscriber` 0.3.23 (MSRV 1.65), and `tracing-appender` 0.2.5 (MSRV 1.63) all sit
+  comfortably under the workspace MSRV, so enabling logging implies no toolchain bump. In
+  `tracing-subscriber` 0.3.23 `reload` is not a feature flag (only `std` is needed for it), and
+  `RollingFileAppender::builder()` exposes `max_log_files`, which is what `[logging].retain_files` maps
+  to.
 - `cargo clean` accepts `--profile <name>`, `--doc`, `--release`, `-p <pkg>`, `--target <triple>`.
 - `incremental` artifacts live in `target/debug/incremental` and are safe to delete at any time.
 - `cargo-sweep` is a third-party tool; pin its version if adopted, and treat it as a convenience, not a

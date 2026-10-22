@@ -3,7 +3,7 @@
 **Status:** Draft for review · **Date:** 2026-10-21 · **Target:** v0.1 (local, single user)
 **Document:** `docs/PLAN.md` · **Docs index:** [README.md](README.md)
 **Stack:** Rust 2024, MSRV **1.94** · ratatui 0.30.2 · crossterm 0.29 · tokio 1.54 · SQLite (sqlx 0.9,
-bundled) · reqwest 0.13 (rustls)
+bundled) · reqwest 0.13 (rustls) · tracing 0.1.44 (diagnostics, [observability.md](observability.md))
 **Working name:** `mta` (binary), repo `multi-machine-ai-orchestrator`
 
 ---
@@ -30,6 +30,8 @@ products — not as a chat window.
 | G8 | Jev as a decision provider | Configure a System One (Jev) provider; agents and engine policies ask typed `noul`/`choice`/`score` questions; every answer is persisted; decisions are advisory by default |
 | G9 | Reuse existing OpenCode agent rosters and `.agents` skills | Open `mta` in a project with `.opencode/agents/*.md` or `.agents/`; those agents appear as delegation targets, run under `mta`'s budgets/approvals/audit, and their permission rules can only restrict (never widen) `mta` policy; `.agents/skills/*/SKILL.md` appear as attachable context, never as an executor |
 | G10 | Event-sourced core: the log explains the state | Every persisted change is a validated command appended to an append-only event log; every view is a projection that can be dropped and rebuilt to the same bytes; no scheduling, approval, or expiry logic depends on a polling cadence |
+| G11 | Debuggable by construction | Every command, effect attempt, provider call, decision, and deadline carries ids that join it to the event log, into a rotating log under `$XDG_STATE_HOME/mta/logs`; secrets and prompt text never reach a record (a property test proves it); the TUI never writes to the terminal; `mta doctor --logs` reports the resolved level, directives, and sinks |
+| G12 | Plan with estimates, not guesses | Every card carries an automatic effort estimate with provenance and confidence; the board shows per-column and overall totals plus a projected finish; estimates are event-sourced, reproducible, manually overridable, and calibrated from recorded actuals — never from a silent mutable field |
 
 ### 1.2 Non-goals for v0.1
 
@@ -75,6 +77,9 @@ products — not as a chat window.
 - Zero known paths where a tool writes outside its workspace without an approval record.
 - Every Jev decision is reproducible from the stored request/response, shows confidence and model
   version, and low-confidence answers produce a human prompt rather than an action.
+- Every open card carries an effort estimate or an explicit `?`; the header, column subtotals, and
+  `mta estimate` agree, a manual estimate survives an edit and a projection rebuild, and a projected
+  finish is shown only when the recorded history supports it.
 
 ---
 
@@ -87,6 +92,7 @@ products — not as a chat window.
 | **Board** | A workflow with ordered columns. v0.1 ships one board, but the schema supports many. |
 | **Column** | Ordered lane with a `kind` — `backlog`, `todo`, `doing`, `review`, `done` — that drives automation. Names are user-editable. |
 | **Task** | Unit of work: title, description, priority, due date, tags, assignee, dependencies, parent. |
+| **Estimate** | A card's expected **effort** (human minutes, the planning number) plus an optional **run forecast** (wall-clock and cost for the assigned agent). Derived automatically, with `source`, `confidence`, and an `inputs_hash`; a manual override is just another `TaskEstimated` with `source = user`. Event-sourced, never a mutable side column. |
 | **Agent** | Named persona: system prompt, chat model alias, optional decision model alias, tool allowlist/policy, budgets, tags used for auto-assignment. Definitions come from `mta` config, the DB, or OpenCode/`.agents` Markdown files. |
 | **Agent source** | Provenance of a definition — `config`, `db`, `opencode-global`, `opencode-project`, `agents-global`, `agents-project` — with path, content hash, and (for project files) a trust record. |
 | **Skill** | A `.agents/skills/<name>/SKILL.md` workflow: name, description, and instruction text, plus optional present-only `references/`. A **separate catalogue kind** — attachable to a run as extra context, never selectable as the agent that executes it (no model, no permissions, no tools). |
@@ -120,39 +126,53 @@ products — not as a chat window.
 ### 2.3 TUI specification
 
 ```
-┌ mta · board:work ───────────────── 2 running · $0.84 today · 1 approval ── ? help ┐
-│ BACKLOG 4        │ TODO 3          │ IN PROGRESS 2   │ REVIEW 1      │ DONE       │
-│ ┌──────────────┐ │ ┌─────────────┐ │ ┌─────────────┐ │ ┌───────────┐ │ ┌────────┐ │
-│ │#51 Vendor    │ │ │#44 Q3 deck  │ │ │▸#42 Inbox   │ │ │#39 Notes  │ │ │#31 ... │ │
-│ │    renewal   │ │ │    outline   │ │ │   triage    │ │ │   cleanup │ │ │        │ │
-│ │    high · mkt│ │ │    @writer   │ │ │   @ops 02:13│ │ │   ✓ ready │ │ │        │ │
-│ └──────────────┘ │ └─────────────┘ │ └─────────────┘ │ └───────────┘ │ └────────┘ │
-│ ┌──────────────┐ │                 │                 │               │            │
-│ │#50 ...       │ │                 │                 │               │            │
+┌ mta · board:work ─── 2 running · $0.84 today · 1 approval · Σ 38h (~7d) ─── ? help ┐
+│ BACKLOG 4 · 10h  │ TODO 3 · 6.5h │ IN PROGRESS 2 · 5h │ REVIEW 1 · 1h │ DONE 12    │
+│ ┌──────────────┐ │ ┌───────────┐ │ ┌───────────────┐ │ ┌───────────┐ │ ┌────────┐ │
+│ │#51 Vendor    │ │ │#44 Q3 deck│ │ │▸#42 Inbox     │ │ │#39 Notes  │ │ │#31 ... │ │
+│ │    renewal   │ │ │    outline│ │ │   triage      │ │ │   cleanup │ │ │        │ │
+│ │    ~3h high  │ │ │    ~2h    │ │ │   ~1h @ops    │ │ │   ~1h     │ │ │        │ │
+│ └──────────────┘ │ └───────────┘ │ └───────────────┘ │ └───────────┘ │ └────────┘ │
+│ ┌──────────────┐ │               │                   │               │            │
+│ │#50 ...       │ │               │                   │               │            │
 ├───────────────────────────────────────────────────────────────────────────────────┤
 │ #42 Inbox triage · Doing · agent:ops · run 7c1e · 62% · $0.11                     │
+│ est 1h (learned, 0.72) · run ~4m / $0.03 · board 38h open · 5.5h/day → ~7d        │
 │ Latest: classified 34 messages; 3 need your decision → approval pending            │
-│ [enter] open  [a] assign  [r] run  [m] move  [n] new  [/] filter  [ctrl-p] palette │
-└──────────────────────────────────────────────────── engine ok · 21:04 ─────────────┘
+│ [enter] open [a] assign [r] run [m] move [n] new [/] filter [T] forecast [^p] palette │
+└──────────────────────────────────────────────── engine ok · 21:04 ─────────────────┘
 ```
 
 **Layout rules**
 
-- Header (1 line): board name, running count, daily spend, pending approvals, help hint.
+- Header (1 line): board name, running count, daily spend, pending approvals, the **remaining-effort
+  total** (`Σ 38h (~7d)`), and the help hint. The total counts Backlog, Todo, and Doing only — never Done
+  or Review, whose effort is already spent — counts **leaf cards only** so a parent and its subtasks are
+  not double-counted, and appends `?n` when `n` open cards have no estimate. With an active filter it
+  reads `Σ 12h/38h` (visible/total). Below 100 columns it collapses
+  to `Σ 38h`; below 80 the whole total is dropped and `T` is the only place to see it.
 - Board (flex): columns equal-width; horizontal scroll when the terminal is narrower than
   `columns × 24`; on `< 60` cols fall back to a single-column list with a lane switcher; each column
-  shows a scrollbar when its cards overflow.
-- Detail strip (3–4 lines): selected card context + latest run line + contextual key hints; the hints
-  are pointer targets (clicking one runs that hint's action).
+  header shows its card count and **effort subtotal** (`TODO 3 · 6.5h`, hidden under 100 cols; Review and
+  Done show spent effort rather than remaining work);
+  each column shows a scrollbar when its cards overflow.
+- Detail strip (3–4 lines): selected card context + estimate line + latest run line + contextual key
+  hints; the hints are pointer targets (clicking one runs that hint's action). The estimate line reads
+  `est 1h (learned, 0.72) · run ~4m / $0.03 · board 38h open · 5.5h/day → ~7d` and degrades to
+  `est 1h (heuristic)` or `est ?` — it never invents a forecast when history is missing.
 - Status line (1 line): engine health (chat and decision providers), clock, host readout, projection
-  lag and applied event `seq`, background job count. The host readout is compact
+  lag and applied event `seq`, background job count, and a diagnostic `warn`/`error` badge (`O` jumps to
+  the first error of the session). The host readout is compact
   (`cpu 19% mem 43% disk 34%`, coloured at the warn thresholds); below 100 columns it collapses to a
   single worst-metric glyph, and below 80 columns it is dropped entirely — the `S` overlay always has
   the full picture.
-- Overlays: card detail/editor, run transcript (scrollable), decision log, event log, system monitor,
-  command palette, agent/skill picker, help, approval dialog, confirm dialog. One overlay at a time; `Esc`
-  always closes; unsaved edits prompt; clicking outside closes a non-destructive overlay but never a
-  confirm dialog.
+- Overlays: card detail/editor, run transcript (scrollable), decision log, event log, diagnostics log,
+  forecast/estimates, system monitor, command palette, agent/skill picker, help, approval dialog,
+  confirm dialog. One overlay
+  at a time; `Esc` always closes; unsaved edits prompt; clicking outside closes a non-destructive overlay
+  but never a confirm dialog. The event log (`E`) is the audit view; the diagnostics log (`O`) is the
+  ephemeral debug view — a different record with a different lifetime
+  ([observability.md](observability.md) §1).
 
 **Keyboard model** (vim-flavoured, arrows always work)
 
@@ -173,12 +193,18 @@ products — not as a chat window.
 | `D` | Open the decision log for the selected card/run (typed Q&A, confidence, model) |
 | `E` | Open the event log overlay (recent events; `Enter` expands the causation chain) |
 | `S` | Open the system monitor overlay (CPU per core + load + temp, RAM/swap, disks per mount, top processes) |
+| `T` | Open the forecast overlay: open-effort totals by column/tag/agent, throughput, projected finish, run-time/cost forecast, calibration table, unestimated cards |
+| `O` | Open the diagnostics log overlay (level/target filters, search, follow; `:log <level>` retunes live) |
 | `y` | Copy task ID / run ID (context-dependent) |
 | `/` | Filter: `#tag`, `@agent`, `is:blocked`, `due:<date>`, free text (FTS) |
 | `Ctrl-P` | Command palette (`:move done`, `:new`, `:agent add`, `:board …`) |
 | `g`/`G` | Top/bottom |
 | `?` | Help (keymap table, generated from one source of truth) |
 | `q` / `Ctrl-C` | Quit (confirm if runs are active) |
+
+In the card editor, the `estimate` field accepts `2h`/`90m` to pin, `-` to clear, `a` to force an
+automatic re-estimate, and blank to keep automatic control. These are field values, not extra keys, so
+editing a title is unchanged.
 
 **Mouse model** (`[ui].mouse`, default on; every gesture maps to an existing key action — there are no
 mouse-only features)
@@ -219,7 +245,12 @@ in [ADR-0008](adr/0008-mouse-hit-map.md).
 
 **Rendering/UX constraints**
 
-- Never colour-only: blocked/overdue/running are also marked with a glyph.
+- Never colour-only: blocked/overdue/running are also marked with a glyph. Estimates use a prefix, not a
+  colour: `~2h` automatic, `=2h` pinned by the user, `?` not estimated; low confidence adds a `·?`
+  suffix rather than changing the hue.
+- Aggregate estimates are **honest about their inputs**: a finish projection appears only when there is
+  enough throughput history (`[estimation].throughput_min_days`, default 3), otherwise the overlay says
+  `insufficient history`; an unestimated card contributes `?`, never `0`.
 - Respect `NO_COLOR`; theme via config (16-colour default; 256/truecolor accents).
 - All async work is off the render path; render is a pure `view(&AppState, frame)`.
 - Long titles truncate with `…` at a measured width (`unicode-width`, wide CJK safe).
@@ -229,8 +260,12 @@ in [ADR-0008](adr/0008-mouse-hit-map.md).
 ```
 mta                     # launch TUI (embeds engine)
 mta tui --board work
-mta task add "Draft Q3 deck" --column todo --agent writer --due 2026-10-25
+mta task add "Draft Q3 deck" --column todo --agent writer --due 2026-10-25 --estimate 2h
 mta task list|move|assign|show
+mta task estimate <id> [2h|--auto|--clear]   # pin, force a re-estimate, or clear one card
+mta task actual <id> 3h                      # record actual effort (the calibration input)
+mta estimate [--board] [--json]              # open-effort totals, per column/tag/agent, projected finish
+mta estimate recompute [--task <id>|--all]   # bounded, idempotent re-estimate (no background sweep)
 mta run <task-id> [--follow]        # headless single run
 mta run <task-id> --skills <id,...>   # attach .agents skills as extra context (never as the executor)
 mta run <task-id> --compact=auto|off [--compact-at N]   # per-run context policy override
@@ -254,9 +289,15 @@ mta replay --from-seq <n> [--dry-run]        # replay/diff the log against the c
 mta projections list|verify|rebuild [--name <p>]   # read-model health and rebuild
 mta snapshot take|list              # per-stream snapshots that bound replay
 mta run export <id> [--out -]       # frozen audit export (required before its stream is pruned)
-mta doctor [--provider <name>] [--context] [--events] [--host]  # health, lag, effects, host
+mta doctor [--provider <name>] [--context] [--events] [--host] [--estimate] [--logs [--follow]] [--bundle]
+                                                     # health, lag, effects, host, calibration, diagnostics, bundle
 mta config init|validate|path
 ```
+
+Global flags (before or after the subcommand): `--log-level <error|warn|info|debug|trace|off>` and
+`--log-format <human|json>`, plus `--config` / `--db`. Precedence is
+`--log-level` > `RUST_LOG` > `[logging]` > `info`; `mta doctor --logs` prints the resolved value *and*
+where it came from ([observability.md](observability.md) §3).
 
 `mta tui` and `mta run --scheduler` both write to the same SQLite file, but **v0.1 refuses to run
 both at once**: the engine holds a **lease** (projected from `LockAcquired`/`LockReleased` events) and
@@ -328,28 +369,40 @@ size-budget.toml               # MiB budgets for target/ and the release binary 
 .gitignore                     # target/, artifacts, editor files
 scripts/                       # size-report.sh, prune-target.sh
 crates/
-  mta-domain/                  # pure types + state machines + event enum, no I/O
-    src/{task,board,agent,skill,run,event,command,ids,error}.rs
+  mta-domain/                  # pure types + state machines + event enum, no I/O, no tracing
+    src/{task,board,agent,skill,run,estimate,event,command,ids,error}.rs
+                                  # estimate.rs: pure heuristic + calibration bucket (ADR-0012)
   mta-store/                   # sqlx + migrations, event log, projections, snapshots, replay
     migrations/0001_init.sql …
   mta-provider/                # OpenAI-compatible chat + System One (Jev) decisions
     src/{openai,stream,systemone,models,error,capabilities}.rs
   mta-engine/                  # command processor, effects, scheduler, executor, agent loop, tools
+    src/effects/               # CallChatModel, ExecuteTool, EstimateTask, … (subscribe → command)
     src/agents/                # agent discovery (.opencode + .agents agents), parsing, merging, trust
     src/skills/                # .agents/skills discovery (SKILL.md only), trust, attachment assembly
   mta-tui/                     # app state, update(), widgets, keymap, host sampler, snapshots
     src/host.rs                # HostMetrics trait + sysinfo impl + sampler task (ephemeral, §3.8)
-  mta-cli/                     # bin `mta`: clap, wiring, config loading, headless modes
+    src/forecast.rs            # BoardVm estimate subtotals + the T overlay view model (ADR-0012)
+    src/diagnostics.rs         # log ring buffer (O overlay); presentation-only, never persisted
+  mta-cli/                     # bin `mta`: clap, wiring, config loading, logging init, headless modes
+    src/logging/               # subscriber setup, sinks, filter parser, panic hook, crash marker (§3.10)
+  mta-testkit/                 # dev-only (never shipped, outside size-budget.toml): log capture for tests
 docs/
   README.md                    # documentation index and conventions
   PLAN.md                      # this implementation plan
   events.md                    # event-sourcing contract: events, commands, effects, projections
   providers.md                 # tested providers + known quirks
   agents.md                    # OpenCode agent compatibility + sub-agent/delegation contract
+  observability.md             # diagnostics: levels, sinks, redaction, spans, rotation
   build.md                     # bounded target/ and binary-size policy
   adr/0001-workspace.md …      # decisions recorded as they are made
 README.md                      # project entry point → docs/
 ```
+
+`mta-testkit` is a workspace member that is **never shipped**: it exists so tests can assert on log
+records (level policy, redaction, correlation ids) without a subscriber per test file. Because it is a
+dev-dependency everywhere it is used, it is excluded from `size-budget.toml` — the budget that matters is
+the `mta` binary ([build.md](build.md)).
 
 A workspace (rather than one crate) is deliberate: the future multi-machine split needs
 `domain`, `provider`, and `engine` usable from a daemon and a remote worker; it also makes compile
@@ -441,6 +494,51 @@ is a `tool_call` row. Payloads are truncated to a configurable byte cap, with th
 workspace when large and referenced by `result_ref`. Run totals are a fold over the run stream
 (`RunUsageRecorded`) and are therefore always consistent with the log; the `run_costs` projection
 materialises them for fast queries.
+
+**Estimation model.** Every task carries one **effort** number and an optional **run forecast**:
+
+| Field | Meaning | Unit / rule |
+|---|---|---|
+| `estimate_minutes` | expected human effort for the card | integer minutes, rounded to 15; clamped to `[15, 480]` by default |
+| `estimate_source` | who produced the current value | `heuristic` (no calibration), `learned` (a calibrated bucket was applied — the formula is still the heuristic), `decision` (Jev-refined), `user` (pinned) |
+| `estimate_confidence` | how much to trust it | `0..=1`; the heuristic starts at 0.35 (max 0.80 with signals), a calibrated bucket adds, a Jev answer uses its normalised confidence, a user pin is 1.0 |
+| `run_forecast` | expected run wall-clock + cost for the assigned agent/model | `duration_ms`, `cost_micro_usd`; absent without an assignee or history |
+| `inputs_hash` | hash of the fields the estimate was computed from | makes an unchanged card a **no-op**, not a new event |
+| `estimator_version` | integer bumped when the formula or feature set changes | a replay never recomputes; it reads the stored value |
+
+The estimate is **an event** (`TaskEstimated`, [events.md §5.1](events.md#51-board-and-task-boardid-taskid)),
+not a side column: the decider validates it, the projection materialises it on `tasks`, and the TUI fold
+maintains its own totals. A rebuild of `tasks` from the log therefore reproduces every estimate exactly,
+including after the heuristic changes — old events keep their `estimator_version`, and a formula change
+applies only to newly estimated cards or an explicit `mta estimate recompute`.
+
+**Effort is human effort, not agent time.** They are deliberately separate: a 2-hour writing task can be
+a 4-minute agent run. Calibration therefore has two independent sources:
+
+- **Effort** calibrates from `TaskEffortRecorded` actuals (`mta task actual`, or the accept dialog).
+  Without actuals the heuristic stands and confidence stays low.
+- **Run forecast** calibrates from completed runs' `duration_ms` and `cost_micro_usd`, grouped by
+  `(agent, model, tag)`, so it learns how *this* agent performs this *kind* of task.
+
+Totals are **leaf-only**: a card with subtasks rolls up `Σ children + 10% coordination` for display but is
+excluded from board/column totals, so parent and child are never counted twice. The header's remaining
+total counts Backlog, Todo, and Doing; Review and Done show spent effort in their column subtotals.
+`?` cards contribute nothing to the sum and are counted separately; they are never treated as zero.
+
+A manual estimate (`source = user`) is sticky: an automatic re-estimate never overwrites it, and only
+`--auto`/`a` or `--clear` returns the card to automatic control. Estimates are advisory planning aids:
+they never block a start, never change a lane, and never size a budget reservation. They are not on the
+critical path of the scheduler.
+
+**Why a heuristic first.** The deterministic estimator is a pure function in `mta-domain` over the card's
+fields (`title`, `description` length, tags, priority, dependency count, parent/children) plus the
+calibration bucket. It needs no network, no model, and no randomness, which keeps `decide` total and
+replay deterministic. Jev is an optional **refinement** for exactly the cases the heuristic cannot judge
+(a long, vague card with an unknown tag): one `score` question over five size buckets, recorded with
+`purpose = "task_estimate"` on the task stream. The heuristic answer is written first and refined later,
+so the card is never blank while a decision call is in flight; a disabled, unavailable, or under-confident
+Jev changes nothing and costs nothing. The formula and its bucket table live in
+[ADR-0012](adr/0012-task-estimation.md).
 
 ### 3.4 Persistence (SQLite)
 
@@ -628,11 +726,19 @@ CREATE TABLE tasks (
   due_at INTEGER,
   tags_json TEXT NOT NULL DEFAULT '[]',
   result_summary TEXT, result_json TEXT,
+  estimate_minutes INTEGER,                 -- NULL = never estimated → UI shows `?`
+  estimate_source TEXT,                     -- heuristic | learned | decision | user
+  estimate_confidence REAL,
+  run_forecast_duration_ms INTEGER,         -- NULL until an agent + history exist
+  run_forecast_cost_micro_usd INTEGER,
+  estimated_at INTEGER,
+  estimate_inputs_hash TEXT,                -- unchanged hash ⇒ EstimateTask appends nothing
   created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
   version INTEGER NOT NULL DEFAULT 1   -- optimistic-UI guard only; the task stream's version is authority
 );
 CREATE INDEX tasks_board_col_pos ON tasks(board_id, column_id, position);
 CREATE INDEX tasks_due ON tasks(due_at) WHERE due_at IS NOT NULL;
+CREATE INDEX tasks_estimate ON tasks(board_id, estimate_minutes) WHERE estimate_minutes IS NOT NULL;
 -- Ordering is integer with gap-free renormalisation: moves/inserts rewrite affected rows inside one
 -- transaction (offset by +100000, then assign 1..n). No UNIQUE(position) so reordering never needs
 -- temporary collisions; repository tests assert contiguity after every mutation.
@@ -642,6 +748,32 @@ CREATE TABLE task_deps (
   depends_on_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
   PRIMARY KEY (task_id, depends_on_id)
 );
+
+-- Calibration inputs. Actuals are explicit human numbers, never inferred from elapsed time.
+CREATE TABLE task_effort (
+  id TEXT PRIMARY KEY,
+  task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  actual_minutes INTEGER NOT NULL CHECK (actual_minutes > 0),
+  estimate_minutes INTEGER NOT NULL,        -- snapshot in force when the actual was recorded
+  recorded_at INTEGER NOT NULL
+);
+CREATE INDEX task_effort_task ON task_effort(task_id, recorded_at);
+
+-- EWMA calibrators, rebuilt from TaskEffortRecorded + run terminal events. The EWMA alpha and the
+-- ratio clamp are fixed constants in the estimator (ADR-0012), not config: a projection rebuild must
+-- not change when the user edits config.toml.
+CREATE TABLE estimate_accuracy (
+  scope TEXT NOT NULL,                      -- 'tag' | 'agent_tag'
+  key TEXT NOT NULL,                        -- tag name, or '<agent-id>|<tag>'
+  samples INTEGER NOT NULL,
+  effort_ratio REAL NOT NULL DEFAULT 1.0,   -- actual/estimated, clamped 0.25..4.0
+  run_duration_ms REAL NOT NULL DEFAULT 0,
+  run_cost_micro_usd REAL NOT NULL DEFAULT 0,
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY (scope, key)
+);
+-- Throughput (effort-minutes completed per working day) is a read-time query over task_effort and the
+-- TaskCompleted timestamps, not a stored projection: the window is a display choice, not a fact.
 
 CREATE TABLE runs (
   id TEXT PRIMARY KEY,
@@ -1003,6 +1135,7 @@ Client rules:
 | `agent_tool` — the agent's `decide` tool | Any subset; the chat model authors state + questions | Answer returned to the agent loop; nothing applied |
 | `auto_assign` | `choice` over eligible agents, plus `noul` "is any agent a fit?" | Suggests (fit p ≥ 0.5); *applies* in headless mode only when `apply_auto_assign = true` and confidence ≥ threshold |
 | `priority` | `score` over P1–P3 from title/description/due date | Suggests a priority badge; applies only in headless mode if configured |
+| `task_estimate` | `score` over five effort buckets (`<1h`, `1–2h`, `2–4h`, `4–8h`, `>1d`) from title, description excerpt, tags, priority, dependencies, and similar completed work | Applies as a *planning estimate* only above `min_confidence`; otherwise the deterministic heuristic stands. It never gates a run, a move, or a budget reservation |
 | `approval_advice` | `noul` "is this action destructive/irreversible?" + `choice` risk class | **Never auto-approves**; shown in the approval dialog with its confidence |
 | `failure_triage` | `choice` {retry, reassign, escalate, abandon} on error + run summary | Suggests the next step in the run panel; engine applies only if configured |
 | `spec_gate` | `noul` "is this task specific enough to start?" | If p(specific) < `spec_threshold` (default 0.6) or confidence is low → `ask_human` before spending tokens |
@@ -1338,6 +1471,23 @@ whether auto-compaction is on, and the estimator calibration sample count.
 - **Priority inference:** optional `score` question over P1–P3 using title, description, due date, and
   tags. It pre-fills a priority badge; the task is only changed (`TaskEdited{changes.priority}`) when
   `apply_priority = true`. Humans always see the suggested value and confidence before/after applying.
+- **Estimation:** an `EstimateTask` effect subscribes to the events that can change an estimate —
+  `TaskCreated`, `TaskEdited`, `TaskDependencyAdded/Removed`, `TaskAssigned/Unassigned`,
+  `TaskEffortRecorded`, run terminal events, a `DecisionAnswered` with
+  `purpose = "task_estimate"`, and `EngineStarted` (backfill only) — and submits
+  `EstimateTask` for the affected streams. There is **no sweep and no recalculation on a timer**: an idle
+  board appends nothing, and a command whose `inputs_hash` matches the current estimate is rejected as a
+  no-op before an event is written. The effect computes the deterministic heuristic in-process, reads the
+  `estimate_accuracy` bucket, and writes the heuristic result; when
+  `[estimation].refine_with_decision` is on, the card is vague (`description` under 120 chars), the tag is
+  uncalibrated, and confidence is below `refine_below_confidence`, the same `EstimateTask` also appends
+  `DecisionRequested{purpose: "task_estimate"}`, and the existing decision pipeline answers it with a
+  `score` over five buckets. The refinement lands as a second `TaskEstimated` (`source = decision`); the
+  card is never blank in the meantime. A decision call is bounded (one per changed card, none while the
+  previous one is in flight), and a failed/under-confident answer simply leaves the heuristic in place.
+  Confidence, `source`, and the bucket's sample count are visible in the card detail and the `T` overlay,
+  so a guess is never dressed up as a fact. Estimates never gate a start, a lane move, or a budget
+  reservation (§3.3).
 - **Spec gate:** before an auto-started run, an optional `noul` "is this task specific enough to
   start?" If P(true) is below `spec_threshold` (default 0.6) or normalised confidence is below
   `min_confidence`, the engine appends `RunBlocked{reason: "needs_detail"}` and an `ApprovalRequested`
@@ -1377,14 +1527,16 @@ whether auto-compaction is on, and the estimator calibration sample count.
 ### 3.8 TUI architecture
 
 - **Pattern:** Elm-ish, no global mutable state. `AppState` (board VM, selection, overlay stack,
-  filter, command prompt, agent list, run transcripts, toasts, connection/engine status, applied `seq`)
-  + `Action` enum + `update(&mut AppState, Action) -> Vec<Command>` +
+  filter, command prompt, agent list, run transcripts, toasts, connection/engine status, applied `seq`,
+  estimate totals and forecast), + `Action` enum + `update(&mut AppState, Action) -> Vec<Command>` +
   `view(&AppState, &mut Frame) -> HitMap`. Commands are requests to the engine (`StartRun`, `MoveTask`,
   `LoadTranscript`, `DecideApproval`) and are named **`Command`**, deliberately not `Effect`, because
   "effect" is now the engine's word for a side effect it runs (ADR-0009 §6); one name per concept. The
   engine replies with **events** — the same events that are appended to the log — which the UI folds into
   its view models. Fully testable without a terminal; the hit map is returned from the pure render so it
-  can be asserted in tests.
+  can be asserted in tests. `BoardVm` maintains the per-column estimate subtotals and the header total
+  incrementally as it folds events; a cold start seeds them from one aggregate query, so `view()` never
+  sums the board itself.
 - **Event loop:** `tokio::select!` over (a) `crossterm::event::EventStream` (`event-stream` feature),
   (b) the engine's event stream, resumed from the UI's own `last_seq`, (c) a **presentation-only repaint
   interval** (`[ui].repaint_ms`, default 250) that exists solely to refresh relative times and spinners
@@ -1422,7 +1574,10 @@ whether auto-compaction is on, and the estimator calibration sample count.
   load average and package temperature when the platform exposes it, RAM/swap with a `Sparkline` history,
   one row per real mount with size/used/available/percent, and the top processes by RSS — the overlay is
   full detail, the status line is the summary; it renders from the newest sample and shows a `stale`
-  badge if sampling stops). Overflowing columns and the run panel render
+  badge if sampling stops), `ForecastOverlay` (`T`: open effort by column/tag/agent, unestimated count,
+  throughput in effort-minutes per working day, projected finish, run-time/cost forecast, and the
+  calibration table `bucket · samples · ratio`; `e` recomputes the selected card, `E` the whole board
+  after a confirmation because it is N commands). Overflowing columns and the run panel render
   a `Scrollbar` whose track and thumb are themselves hit targets; `ApprovalDialog` buttons and the
   detail-strip key hints are registered as pointer regions too.
 - **Pointer input (hit map):** ratatui has no hit testing, so `view()` returns a `HitMap`: an ordered
@@ -1482,6 +1637,16 @@ whether auto-compaction is on, and the estimator calibration sample count.
   `mta run --compact=off --compact-at N` overrides them for a single run. Overrides replace, never
   merge. Values are re-read from the live config for each new `llm_call` step; an active summary keeps
   the settings it was built with, so a mid-run change cannot corrupt an existing compaction.
+- **Estimation:** `[estimation]` controls the auto-estimator — `enabled` (default true),
+  `default_minutes`, `min_minutes` / `max_minutes`, `round_to_minutes`, `workday_hours` (display only),
+  the `tag_minutes` table, `priority_multiplier`, the description-size steps, and the dependency bonus.
+  `learn_from_actuals` (default true) turns calibration on; `throughput_window_days` (default 14) and
+  `throughput_min_days` (default 3) control the projected finish, and `refine_with_decision` /
+  `refine_below_confidence` govern the optional Jev `score` refinement. The EWMA alpha, the calibration
+  ratio clamp, and the bucket mapping are **constants in the estimator, not config** — a config change
+  must not alter a projection rebuild (ADR-0012). The estimator is dependency-free integer/float
+  arithmetic in `mta-domain`; no new crate is added. An estimate never gates a run, a lane move, or a
+  budget reservation, so a bad configuration degrades planning quality, not execution.
 - **Pointer/UI:** `[ui].mouse` (default **true**) enables pointer input; `scroll_lines` (default 3) is
   the wheel-notch distance; `hover` (default false) highlights the region under the pointer;
   `double_click_ms` (default 400) sets the double-click window; `repaint_ms` (default 250) is the
@@ -1532,10 +1697,20 @@ whether auto-compaction is on, and the estimator calibration sample count.
 - Keys: `api_key_env = "OPENAI_API_KEY"` (chat) / `KENARI_API_KEY` (Jev) preferred; `api_key_file`
   (must be 0600) next; OS keyring optional feature. Plain `api_key` is accepted but warns and is
   redacted in logs.
-- Never log request headers or message content at `info`; `trace` requires an explicit opt-in and
-  writes to a file (not the TUI).
-- Logs: `$XDG_STATE_HOME/mta/logs/` via `tracing-appender`, JSON optional; the TUI shows only
-  warnings/errors + a log-file hint.
+- Never log request headers or message content at `info`; prompt text and tool output require the
+  explicit `log_prompts` / `log_tool_output` opt-ins and are still redacted.
+- **Diagnostics:** `[logging]` governs the *ephemeral* debug log, which is deliberately **not** the event
+  log ([observability.md](observability.md),
+  [ADR-0011](adr/0011-observability-and-diagnostics.md)) — `level`, `directives` (per-target overrides,
+  longest match wins), `format` (`human`|`json`), `ansi` (`auto`|`always`|`never`), `console` (stderr
+  sink; auto-disabled while the TUI owns the screen), `file`, `dir` (default
+  `$XDG_STATE_HOME/mta/logs`), `rotate` (`daily`|`hourly`|`never`), `retain_files`, `max_file_mb`,
+  `max_total_mb` (hard cap), `ring_lines` (TUI overlay buffer, never persisted), `log_prompts`,
+  `log_tool_output`, `max_field_bytes` (truncation), and `dedup_window_ms` (collapse repeated records).
+  Precedence: `--log-level` > `RUST_LOG` > `[logging]` > `info`, with the resolved value and its origin
+  printed by `mta doctor --logs`. A record carries the ids (`command_id`, `stream_id`, `seq`, `run_id`)
+  that join it to the log, so a log line is always traceable to the event that caused it, and the TUI's
+  `O` overlay tails the ring while `:log <level>` retunes live.
 
 ### 3.10 Security and observability
 
@@ -1569,10 +1744,31 @@ whether auto-compaction is on, and the estimator calibration sample count.
   Provider calls go to the configured `base_url` only, with redirects disabled.
 - Rate limits: token-bucket per provider (requests/min + concurrent streams), configurable; 429s
   respect `Retry-After`.
+- **Diagnostic logs are a different record, on purpose.** The audit trail is the event log; the debug log
+  is an ephemeral `tracing` stream with levels, per-target directives, three sinks (stderr, a rotating
+  file, an in-process ring feeding the `O` overlay), redaction, and bounded rotation — the engine never
+  reads it and losing it changes no state. It is where the non-deterministic detail that the event log must
+  **not** carry actually lives: durations, retry attempts, HTTP status codes, estimator inputs, selected
+  model resolution. Contract: [observability.md](observability.md); rationale:
+  [ADR-0011](adr/0011-observability-and-diagnostics.md).
+- **Deciders do not log.** `mta-domain` has no `tracing` dependency at all, so the purity rule that keeps
+  replay deterministic (no clock, no RNG, no I/O in `decide`) is structural rather than a review
+  convention: the command processor records the decider's structured rejection and the enclosing `decide`
+  span from the outside. `cargo tree -p mta-domain` is asserted to stay free of `tracing`.
+- **Secrets stay out of diagnostics.** A `Secret` newtype redacts on `Debug`/`Display`/`Serialize`, keys are
+  identified by their `api_key_env` **name**, `Authorization` headers are never formatted, prompt text and
+  tool output are off by default, and a property test asserts that no configured secret value appears in
+  any captured record at any level — including with `log_prompts` and `log_tool_output` enabled. Library
+  crates deny `clippy::print_stdout`/`print_stderr`, so the subscriber is the only way to emit
+  diagnostics, and the console sink is disabled by the same RAII guard that owns the alternate screen
+  (a record cannot paint over the frame).
 - Health: `mta doctor` checks DB integrity (`PRAGMA quick_check`), migrations, config, provider
   connectivity, disk space for workspaces, lease state, and (with `--events`) log health, projection
   lag, and pending effects; `--host` prints a one-shot CPU/RAM/disk report (the `S` overlay's data,
-  headless). Host readings are never logged at `info`, and no sample is ever written to the event log.
+  headless); `--logs [--follow]` prints the resolved level/directives/sinks, the log path, file count and
+  size against the caps, and the last records; `--bundle` writes the redacted support archive
+  ([observability.md](observability.md) §10). Host readings are never logged at `info`, and no sample is
+  ever written to the event log.
 
 ### 3.11 Bounded build artifacts and binary size
 
@@ -1611,8 +1807,10 @@ build output as a **budgeted resource**, not an unlimited cache. Full rationale 
 | Architecture | event-sourced core: commands → validated events → projections; engine owns the log, UI folds the event stream | audit and "why?" for free, replayable/rebuildable reads, no polling cadence, daemon split becomes a transport swap, log replication *is* the v0.2 protocol | CRUD tables with notification events (no causation, polling stays), event-source only runs (two mental models) |
 | Architecture detail | engine owns store; UI view-model over events | no blocking UI, clean daemon split later | UI queries DB directly (lock contention, coupling) |
 | Host metrics (CPU/RAM/disk) | ephemeral sampler task over a `watch` channel, `sysinfo` behind a `HostMetrics` trait, presentation-only; opt-in debounced `HostPressureObserved` is the sole logged form | operators need machine headroom on screen, but readings are non-deterministic and meaningless to replay — logging them would violate determinism and bloat the only unbounded table; the trait keeps the widget testable and platform-specific | sampling into the event log (non-deterministic replay, log spam), shelling out to `free`/`df`/`top` and parsing text (fragile, locale- and platform-dependent), re-reading `/proc` on every repaint |
+| Diagnostics | ephemeral `tracing` log kept separate from the event log: levels, per-target directives, stderr + rotating file + TUI ring, redaction, and deciders that cannot log | "what happened" (events) and "what was it doing" (logs) have different lifetimes and different determinism requirements; telemetry written as events would break replay and bloat the only unbounded table, while a log the router never reads is free to be lossy. Skipping `env-filter` keeps the filter grammar small and the regex automata out of the binary | `log` + `env_logger` (no spans or structured fields, a regex filter anyway, and still a bespoke file sink and TUI buffer), telemetry as events (non-deterministic replay), a hand-rolled writer, OpenTelemetry export in v0.1 |
 | Provider abstraction | thin OpenAI-chat wire + separate System One (Jev) decision wire, capability flags | "OpenAI-compatible" is the requested standard; Jev is deliberately not chat and forcing it into that trait would fail | per-vendor SDKs, generic multi-protocol layer |
 | Jev integration | first-class `DecisionModel` with typed questions, advisory by default | `noul`/`choice`/`score` are calibrated and auditable; cheap vs another chat call | prompting the chat model to self-rate; MCP-only; auto-approving from model output |
+| Task estimation | event-sourced `TaskEstimated`/`TaskEffortRecorded`; deterministic heuristic first, then calibration from actuals, then an optional Jev `score` refinement; effort primary + run forecast; manual pin wins; leaf-only totals | an estimate is a persisted, replayable fact with provenance — recomputing it at render time would change under the user and break rebuild identity; human effort and agent time are different numbers, so they calibrate separately; the heuristic works offline and costs nothing | computing totals in `view()` from mutable columns (unstable, not replayable), one opaque LLM estimate per card (cost, latency, unauditable), story points only (no duration/cost forecast), a separate estimation table written outside the log |
 | Agent loop | explicit step machine with budgets + approvals | auditable, testable, safe | free-form agent framework (opaque, unbounded) |
 | Sub-agents | reuse OpenCode Markdown definitions; child runs on `mta`'s runtime; permissions restrict only | the roster already exists on disk; one execution/audit/budget model; untrusted-project gate | shelling out to `opencode` (bypasses budgets/approvals/audit), an mta-only format (duplicated prompts), field-level merge (opaque effective policy) |
 | Catalogue discovery | multi-root: `.opencode/agents/**`, `.agents/agents/**` (+ `.agents/*.md`), globals in `~/.config/opencode/agents` and `~/.agents`, config last; narrow globs, and a skill directory is a black box except `SKILL.md` | that is where agents and skills actually live on a real machine; one scan, one roster surface; the narrow glob is what stops `references/*.md` being registered as agents | a single `.opencode/agents` root (misses the `.agents` convention), `.agents/**/*.md` (registers a skill's reference corpus as agents), scanning every `.md` under the project (slow, wrong) |
@@ -1627,7 +1825,7 @@ build output as a **budgeted resource**, not an unlimited cache. Full rationale 
 
 Estimates assume one focused developer; each milestone ends with a demoable artifact and green CI.
 
-### M0 — Bootstrap (1 day)
+### M0 — Bootstrap (2 days)
 
 - Workspace, `rust-toolchain.toml` pinned to 1.94, edition 2024, `rust-version`, shared lints,
   committed `Cargo.lock`, CI (linux/macOS) running fmt, clippy, test, `cargo deny`, `cargo audit`,
@@ -1636,20 +1834,31 @@ Estimates assume one focused developer; each milestone ends with a demoable arti
 - Build hygiene baseline: `.gitignore`, size-aware profiles, `size-budget.toml`,
   `scripts/size-report.sh` / `prune-target.sh`, and a CI job running `size-report.sh --check`.
   Calibrate the placeholder budgets to the first real build.
+- **Diagnostics baseline:** `mta-cli/src/logging/` (subscriber, console + rotating file sinks, the
+  `directives`/`RUST_LOG` parser, the wrapped panic hook and `crash-<ts>.json` marker), `[logging]` in
+  config, the `Secret` newtype and the no-secret property test, `mta-testkit`'s log capture, the
+  `print_stdout`/`print_stderr` lint denies, the `cargo tree -p mta-domain` purity check, and
+  `mta doctor --logs`. Measure and book the binary-size delta in `size-budget.toml`
+  ([observability.md](observability.md), [ADR-0011](adr/0011-observability-and-diagnostics.md)).
 - Minimal TUI that draws a frame, handles `q`, and restores the terminal on panic (smoke test).
 - Review and accept the drafted ADRs ([adr/](adr/)): 0001 workspace boundaries, 0002 version pinning and
   pre-1.0 ratatui crates, 0003 engine-owns-store (as amended by 0009), 0004 Jev as a decision provider,
-  0005 build-size budgets, 0006 OpenCode sub-agents, 0007 context compaction, 0008 mouse hit map, and
-  **0009 event-sourced core** — whose `docs/events.md` contract is an M1 deliverable.
+  0005 build-size budgets, 0006 OpenCode sub-agents, 0007 context compaction, 0008 mouse hit map,
+  **0009 event-sourced core** — whose `docs/events.md` contract is an M1 deliverable — and **0011
+  diagnostics**. ADR-0012 (task estimation) is accepted in M2 with the heuristic/event slice and refined
+  in M6/M7.
 
 **Exit:** clean checkout builds and tests; duplicate-dependency gate green; panic test leaves the
-terminal usable; `scripts/size-report.sh --check` passes with budgets reflecting the measured first
-build.
+terminal usable; a secret passed through every log level appears in no captured record; `doctor --logs`
+reports sink paths and resolved level; `scripts/size-report.sh --check` passes with budgets reflecting the
+measured first build.
 
 ### M1 — Domain + event store (7 days)
 
 - `mta-domain`: IDs, entities, column-kind guards, task/run state machines (§3.3), transition errors, and
-  the **event and command enums** (`event.rs`, `command.rs`). Unit tests + proptest: no illegal
+  the **event and command enums** (`event.rs`, `command.rs`), including the estimation events/commands
+  (`TaskEstimated`, `TaskEffortRecorded`, `EstimateTask`, `SetTaskEstimate`, `ClearTaskEstimate`,
+  `RecordTaskEffort`). Unit tests + proptest: no illegal
   transition succeeds, all legal ones do, and every command's `decide` is total (either a valid event set
   or a typed rejection — never a panic).
 - **Event store (the source of truth):** `events` envelope + append with expected per-stream `version`
@@ -1674,7 +1883,7 @@ build.
 dropping and rebuilding every projection reproduces the same board; replay of the CLI session's log is
 byte-identical; invariant tests green; `EXPLAIN QUERY PLAN` reviewed for board queries.
 
-### M2 — TUI shell + read-only board (5 days)
+### M2 — TUI shell + read-only board (6 days)
 
 - `AppState`/`Action`/`update`/`view -> HitMap`, layout and breakpoints, event loop, terminal lifecycle
   (§3.8), keymap, filter parser, help overlay, palette skeleton, toasts.
@@ -1683,6 +1892,13 @@ byte-identical; invariant tests green; `EXPLAIN QUERY PLAN` reviewed for board q
   built against the event stream and view models, not the engine**, so it can land before the engine and
   de-risk layout/perf early. The seed generator literally reports a recorded event log fixture through
   the same fold path, which is also how M1's golden replay fixture gets reused.
+- **Estimates — first slice:** the pure heuristic estimator in `mta-domain` (tags, description size,
+  priority, dependencies, children; integer minutes, 15-minute rounding, clamps), `BoardVm` incremental
+  per-column subtotals + leaf-only open total, `~`/`=`/`?` prefixes on cards, the header total
+  (`Σ 38h (~7d)` where history allows), and the column subtotals. Read-only: no engine, no Jev, no
+  calibration; `FakeEventSource` feeds `TaskEstimated` events so the fold and the layouts are proven at
+  four terminal sizes before the engine exists. Confidence/degradation is snapshot-tested (`?`, low
+  confidence, filtered totals, `<100`/`<80` column collapse).
 - **Host metrics — first slice:** `HostMetrics` trait + `sysinfo = "=0.38.4"` impl, sampler task on
   `[host].sample_ms` feeding a `watch` channel, the compact status-line readout (`cpu %·mem %·disk %`)
   with warn colouring and the narrow-terminal degradation ladder, and the `S` overlay (per-core CPU,
@@ -1697,7 +1913,8 @@ byte-identical; invariant tests green; `EXPLAIN QUERY PLAN` reviewed for board q
 
 **Exit:** browse/filter/scroll a 200-card seeded board with keyboard or mouse under 16 ms/frame; every
 clicked region triggers its documented key action; the status line shows live CPU/RAM/disk and `S` opens
-full detail without the engine running; snapshots stable; no engine required to demo.
+full detail without the engine running; cards show automatic estimates (`~`/`=`/`?`) and the header and
+column totals agree with the folded fixture; snapshots stable; no engine required to demo.
 
 ### M3 — Provider layer (5 days)
 
@@ -1723,7 +1940,8 @@ run.
   ask_human/finish`), canonical-path containment, process-group kill, timeouts, output caps, SSRF and
   proxy policy, secret scrubbing.
 - **Effect runner:** subscribe to events, run effects (`CallChatModel`, `ExecuteTool`, `RunSubagent`,
-  `WriteArtifact`), submit results as commands, dedupe by `idempotency_key`, back off with a
+  `WriteArtifact`, `EstimateTask` — the base heuristic + `inputs_hash` no-op lands here), submit results
+  as commands, dedupe by `idempotency_key`, back off with a
   `provider_retry` deadline, and re-issue pending effects after a crash; `EffectFailed` for durable
   failures.
 - Run lifecycle as events (`RunQueued/RunStarted/RunStepStarted/RunStepCompleted/RunSucceeded/RunFailed/
@@ -1812,18 +2030,26 @@ transcript/budget/cancellation as specified, and attaches a skill whose text app
 the log; a malformed or hostile file of either kind cannot crash startup, widen policy, or be silently run
 as an agent.
 
-### M6 — Interactive TUI (5 days)
+### M6 — Interactive TUI (6 days)
 
 - Card editor (title/description/priority/due/tags), assign picker, move/reorder with guards, typed
   confirmations, command palette actions, agent/model manager (read + enable/disable; create/edit via
   `$EDITOR` on config).
+- **Estimate capture + forecast:** the estimate field in the card editor (blank = auto, `2h` = pin,
+  `-` = clear, `a` = recompute), the accept dialog's optional actual effort (which appends
+  `TaskEffortRecorded`), the `T` forecast overlay (open effort by column/tag/agent, throughput,
+  projected finish, run-time/cost forecast, the calibration table, the `?` list, and `e`/`E` bounded
+  recompute with a confirmation), and pointer parity for its rows. `BoardVm` updates the header and
+  column totals from the same `TaskEstimated` events it already folds.
 - **Mouse in overlays:** palette rows execute on click, approval buttons dispatch the same guarded
   action (destructive approvals still confirm), outside-click closes a non-destructive modal, run-panel
   transcript scroll + step select/expand, scrollbar drag in long lists, hit-map parity tests.
 - Run panel with virtualised live streaming, decision steps (`question → answer + confidence`),
   collapsed `subagent_call` steps with `Enter` → child transcript, child approvals inline, approval
   dialog (payload + hash-bound decisions + Jev's advisory verdict), cancel, retry, decision log overlay
-  (`D`), **event log overlay (`E`, with causation chain and projection lag in the status line)**, agent
+  (`D`), **event log overlay (`E`, with causation chain and projection lag in the status line)**,
+  **diagnostics log overlay (`O`: ring tail, level/target filters, search, follow, `:log <level>` live
+  retune, `warn`/`error` badge)**, agent
   roster overlay (`A`, source/trust/warnings), **system monitor overlay (`S`) with host-pressure badges
   and the opt-in debounced `HostPressureObserved` breadcrumb**, Jev-ranked agent suggestions in the
   picker, digest overlay placeholder.
@@ -1833,7 +2059,7 @@ as an agent.
 **Exit:** the full flow in §2.2 works entirely in the TUI, with keyboard or mouse; approval decisions in
 the UI and from the CLI behave identically; no pointer path bypasses a confirmation; snapshots stable.
 
-### M7 — Orchestration (5 days)
+### M7 — Orchestration (6 days)
 
 - **Event-reactive scheduler:** recompute the ready set from relevant events (no tick), run slots, WIP
   policy, dependencies, auto-assign by skills, retries/failure policy, engine lease (projected from
@@ -1844,6 +2070,13 @@ the UI and from the CLI behave identically; no pointer path bypasses a confirmat
 - Decision policies: spec gate before auto-start, Jev-ranked auto-assign, priority inference, failure
   triage, confidence thresholds, `apply_*` switches, decision `outcome` recording, deterministic
   fallback when Jev is disabled/unavailable/under-confident.
+- **Estimation policy:** calibration and refinement in the `EstimateTask` effect built in M4
+  (actual/run-terminal/decision triggers, one refinement in flight, no sweep), the `estimate_accuracy`
+  projection from `TaskEffortRecorded` + run terminal events with the fixed EWMA constants, throughput
+  and projected finish, the optional `purpose = "task_estimate"` Jev `score` refinement, the CLI
+  (`mta estimate`, `mta task estimate|actual`, `mta estimate recompute`), and `mta doctor --estimate`.
+  Tests: golden heuristic tables, calibration fixtures, insufficient-history honesty, Jev-disabled
+  fallback, and an idle board appending nothing.
 - Cron schedules + task templates with dedupe (`ScheduleRegistered`/`ScheduleDue`/`ScheduleFired`/
   `ScheduleSkipped`); budget reservation (`RunBudgetReserved`); daily/monthly windows via `DayRolled`;
   standup digest (model + deterministic fallback) including decisions, low-confidence rate, and spend.
@@ -1854,20 +2087,25 @@ the UI and from the CLI behave identically; no pointer path bypasses a confirmat
 
 **Exit:** an overnight simulated schedule creates and runs tasks with no polling loop anywhere in the
 engine; the daily cap stops new work cleanly and visibly; digest matches seeded truth; killing the engine
-and restarting reproduces the same ready set and re-arms the same deadlines.
+and restarting reproduces the same ready set and re-arms the same deadlines; an idle board appends no
+estimation events and `mta estimate` agrees with the TUI header.
 
 ### M8 — Hardening and release (4 days)
 
 - **Log operations:** `mta projections verify` (scratch rebuild + diff) and `rebuild`, `mta replay
   --dry-run` diffing before commit, per-stream snapshots under a real load, `mta gc` with the retention
   watermark and the `mta run export` precondition, and a projection-rebuild time budget.
+  **Diagnostics operations:** `mta doctor --logs`/`--bundle`, rotation and the `max_total_mb` prune under
+  a synthetic `debug` flood, log-dir usage reported against the caps, and a redaction audit of the bundle
+  (a support archive that leaks a key is a release blocker).
 - Crash/recovery: lease takeover, orphaned workspaces, backup/restore command, `CrashRecovered` exercised
   by killing the process mid-run and mid-effect.
 - Performance pass (200 cards, 10k events, 5k messages), startup < 300 ms including cold projection
   check, replay throughput (events/s), memory sanity, release binary within the size budget.
 - Docs: README with asciinema demo, provider guide, config reference, **event-sourcing contract pointer
   ([events.md](events.md)) and a "why is this card like this?" walkthrough**, approval/security model,
-  troubleshooting, contributor guide.
+  troubleshooting (including "which log do I read?" — [observability.md](observability.md)),
+  contributor guide.
 - Packaging: `cargo dist` (linux x86_64/aarch64, macOS), shell completions, man page; CI runs
   `cargo audit`/`deny`.
 - Optional: Dockerfile for headless scheduler.
@@ -1877,14 +2115,21 @@ deliberately corrupted projection is caught by `verify` and repaired by `rebuild
 §8 signed off; migrations pass from empty and from every released tag (there is no prior schema before
 v0.1).
 
-**Total:** 47 engineer-days itemised (M0 1 · M1 7 · M2 5 · M3 5 · M4 5 · M5 6 · M5.5 4 · M6 5 · M7 5 ·
-M8 4), **~54 with a 15% buffer**. Event sourcing is the single biggest reason M1 and M8 grew
+**Total:** 51 engineer-days itemised (M0 2 · M1 7 · M2 6 · M3 5 · M4 5 · M5 6 · M5.5 4 · M6 6 · M7 6 ·
+M8 4), **~59 with a 15% buffer**. Event sourcing is the single biggest reason M1 and M8 grew
 (+4 and +1): the event store, deciders, projection framework, replay/rebuild tooling, and upcasters are
-front-loaded infrastructure that the later milestones then consume. M2 grew by 1 (+1 day) for the host
+front-loaded infrastructure that the later milestones then consume. M0 grew by 1 (+1 day) for the
+diagnostics baseline — subscriber, sinks, filter parser, redaction and its property test, the panic-hook
+crash marker, and `doctor --logs` — because a log you cannot trust is worse than none, and wiring it at
+bootstrap is what keeps the `info`-level discipline (bounded per run) from decaying into noise later.
+M2 grew by 1 (+1 day) for the host
 sampler, status-line readout, and `S` overlay, which were folded into a milestone that already builds the
 status line, overlay stack, and event loop rather than opening a milestone of their own; M5.5 grew by 1
 (+1 day) for the `.agents` roots and the skill kind, which are the same scan, the same trust gate, and the
-same roster surface as the agents that milestone already delivers. Provider quirks, terminal plumbing,
+same roster surface as the agents that milestone already delivers. M2, M6, and M7 each grew by 1 (+3 days)
+for auto-estimation: the heuristic and the read-only card/column/header totals in M2, overridable
+estimates plus the `T` forecast overlay in M6, and calibration, the Jev refinement, throughput, and the
+`mta estimate` CLI in M7. Provider quirks, terminal plumbing,
 and restart semantics are the usual overruns; they are inside these tasks, not extra scope.
 The critical path is M1 → M3 → M4 → M5 → M5.5 → M6. With two people, M2 can run alongside M3 and M8 docs
 can start during M6/M7.
@@ -1908,6 +2153,9 @@ this phase adds transport, not a rewrite.
 | Store | Temp-dir SQLite, migrations from empty, reopen, FK/cascade, FTS, position renormalisation |
 | Provider | `httpmock` fixtures (success, streaming edge cases, errors, retries), no network in CI |
 | Decisions | fixtures for `noul`/`choice`/`score`/malformed answers, 402/404/429, timeouts; validation unit tests; `ScriptedDecisionModel` for policies; per-purpose policy tests (suggest vs apply thresholds) |
+| Estimation heuristic | golden tables for tags, priority, dependencies, description steps, and child rollup; 15-minute rounding and the `[min_minutes, max_minutes]` clamp; monotone in description length; same inputs ⇒ same output; an `estimator_version` bump changes only new estimates; properties: never negative, never above the cap, never `0` for an estimated leaf |
+| Estimation events & display | `TaskEstimated` is idempotent by `inputs_hash` (a second auto estimate appends nothing); a manual pin survives an auto re-estimate and an unrelated edit; clear → `?`; replay/rebuild reproduces every estimate **without invoking the estimator**; leaf-only totals count a parent+child once; filtered total reads `12h/38h`; `~`/`=`/`?` semantics; low-confidence and `insufficient history` labels; `T` overlay snapshots at four sizes; `doctor --estimate` agrees with the header |
+| Estimate calibration & forecast | EWMA fixture with the fixed alpha and ratio clamp; a rebuild of `estimate_accuracy` is byte-identical; an actual with no prior estimate is ignored; run forecast groups by `(agent, model, tag)`; a finish date appears only after `throughput_min_days`; Jev `score` mapping at bucket boundaries; a disabled/under-confident/402 Jev leaves the heuristic and appends no second estimate |
 | Agent definitions | fixtures for V2 lists + V1 maps, precedence/tombstones, nested IDs, malformed/hostile files; property test that agent rules never widen global policy; model-resolution matrix; trust-per-hash re-prompt |
 | Catalogue discovery (agents + skills) | all four roots and the documented precedence, including `.opencode/agents` vs `.agents/agents` vs `.agents/*.md` in one directory and `list --all` shadow reporting; **the black-box regression test** — a skill directory carrying `references/chapter_0N.md` yields exactly one `kind = skill` entry and zero agents, which fails the moment the glob widens to `.agents/**`; `ScanCatalogs` twice unchanged appends nothing; skill frontmatter `name` vs directory mismatch; `agents/openai.yaml` and `openai.yml`; oversized `SKILL.md`; an unrecognised skill root (`.opencode/skills/…`) reported once and not read |
 | Skill attachment | `StartRun --skills` records `RunStarted.attached_skills[]` with bodies and `runs.skill_snapshot_json`; replaying that log needs no file on disk and is byte-identical after the `SKILL.md` is edited; over-cap, unknown, disabled, untrusted, and hash-mismatched attachments are each rejected without appending a run; a delegated child gets skills only when passed; `delegate` targeting a skill fails fast |
@@ -1920,6 +2168,7 @@ this phase adds transport, not a rewrite.
 | TUI | `TestBackend` + `insta` snapshots; key-sequence harness; layout at 4 sizes; `NO_COLOR` |
 | Mouse & hit map | rect→region resolution with z-order (overlay beats board, later draw wins), click yields the same `Action` as the documented key for every region, wheel clamping and no overscroll, scrollbar drag math, stale map after a resize is dropped, motion flood ignored unless `hover`, destructive approval click still opens the confirm dialog, mouse capture released on panic/SIGTERM/exit |
 | Host metrics | `FakeHostMetrics` drives the status line and `S` overlay snapshots; first sample discarded (CPU needs a delta); warn thresholds and the header badge; the narrow-width degradation ladder (full readout → worst-metric glyph → omitted); synthetic mounts (`tmpfs`/`efivarfs`/`overlay`) excluded from the disk list; a stalled sampler shows `stale` and never blanks the widget; the sampler is absent from the event log (a full replay asserts zero host events beyond an enabled `HostPressureObserved`); `observe_pressure` is rising-edge only and respects its cool-down |
+| Diagnostics | no-secret property test across every level with `log_prompts`/`log_tool_output` enabled; with the alternate screen active, zero bytes reach stdout/stderr and a simulated panic writes the crash marker and restores sinks; a full successful run emits ≤ N `info` records; records for a fixture run carry `run_id`/`seq`/`command_id` that join to the log; a synthetic flood respects `max_file_mb`/`retain_files`/`max_total_mb` with a prune `warn`; directive/`RUST_LOG` parser tables incl. unknown level → exit 2; `json` output parses and contains the documented fields; `cargo tree -p mta-domain` has no `tracing` |
 | CLI/e2e | `assert_cmd` + scripted provider env var; golden transcript/DB assertions |
 | Manual | tmux QA script per milestone (resize, paste, suspend, panic recovery, slow provider) |
 
@@ -1941,6 +2190,8 @@ the public test kit so users can reproduce agent behaviour without spending toke
 | OpenAI-compatible servers differ (tools, usage, SSE framing) | Runs fail or hang | Minimal wire subset, capability flags + degrade path, conformance fixtures, `doctor` probe, documented matrix |
 | Runaway agent (loops, cost) | Money/time loss | Hard per-run budgets, loop detector, daily cap, visible cost, kill switch, supervised default |
 | Over-trusting Jev decisions | Wrong routing/priority, automation bias | Advisory by default, `min_confidence`, explicit `apply_*` switches, show model+confidence, record outcomes for calibration, never auto-approve side effects |
+| Estimates are wrong, stale, or silently drift | Bad planning, lost trust in the numbers | Provenance + confidence on every card, `?` rather than `0` when unknown, human effort and agent time calibrated from separate evidence, a manual pin that auto-estimation cannot overwrite, `insufficient history` instead of a fake finish date, and no gating of execution on an estimate; `mta estimate recompute` is explicit and `doctor --estimate` shows the sample counts |
+| Estimation becomes a hidden poll or log spam | Event log churn, Jev spend, UI jitter | The estimator is event-driven (`EstimateTask` effect) with no sweep; identical `inputs_hash` appends nothing; one decision refinement in flight per card; `refine_with_decision` is a switch; a full replay reads stored estimates and never re-estimates |
 | Jev model id/contract drift (free ids change, MCP default id is stale) | Decisions fail | Resolve ids from `GET /v1/models?modality=systemone`, pin alias in config, `doctor` probe, fail-closed validation, deterministic fallback |
 | Decision state leaks sensitive task content | Privacy | Explicit state assembly, redaction, `store_state` hash/excerpt modes, document provider data flow |
 | Prompt injection via fetched content | Unauthorised actions | Untrusted-content wrapping, tool allowlist, approvals for side effects, injection tests |
@@ -1961,7 +2212,9 @@ the public test kit so users can reproduce agent behaviour without spending toke
 | SQLite lock contention / corruption | Data loss | One-connection write pool + read pool, per-connection pragmas, WAL, busy timeout, `quick_check` in doctor, backup command |
 | Event log grows without bound (the only unbounded table) | Disk exhaustion, slow replay | `[events] retention_days` watermark GC that never prunes above a projection offset or a stream's last snapshot; `mta run export` mandatory before pruning that run; `doctor --events` reports growth; `snapshot_interval` bounds replay cost; size budgets cover the data dir |
 | Replay is silently non-deterministic (a clock, RNG, or DB read inside a `decide`) | The log stops being the source of truth and rebuilds diverge | Deciders take time/ids from the command and store them in the payload; no clock/random/IO allowed in `decide` (lint + review gate); replay-determinism and `snapshot + tail == full replay` tests; `projections verify` diffs a scratch rebuild |
-| Debugging moves up a level of indirection | Slow diagnosis, "where did this come from?" | `mta events show <id>` renders the correlation/causation chain; the TUI event-log overlay (`E`) shows the same; `mta doctor --events` surfaces unreplayed events and pending effects; a documented "why is this card like this?" walkthrough in M8 |
+| Debugging moves up a level of indirection | Slow diagnosis, "where did this come from?" | `mta events show <id>` renders the correlation/causation chain; the TUI event-log overlay (`E`) shows the same; the diagnostics overlay (`O`) shows what the code was doing while those events were appended, greppable by `run_id`/`command_id`; `mta doctor --events` surfaces unreplayed events and pending effects; a documented "why is this card like this?" walkthrough in M8 |
+| Diagnostics leak a secret (or the support bundle does) | Credential or private-data exposure in a file that gets shared | `Secret` type redacts on `Debug`/`Display`/`Serialize`; keys logged by `api_key_env` name only; `Authorization` never formatted; prompts and tool output opt-in; a property test asserts no secret at any level even with both opt-ins on; `doctor --bundle` is a redaction-audited artifact |
+| A chatty `debug` session fills the disk | Disk exhaustion from diagnostics | Diagnostics are bounded like `target/`: `max_file_mb` early rotation, `retain_files`, a hard `max_total_mb` prune with a `warn`, lossy non-blocking writes that never stall the engine, nothing per token above `trace`, and `info` bounded per run by test |
 | Projection lag looks like a UI bug | Confusing staleness, duplicated work | `projection_offsets` drives a status-line lag figure; the UI resumes from its own `last_seq` on `Lagged` rather than guessing; `verify` distinguishes "stale" from "wrong" |
 | Schema evolution breaks old logs | Unreadable history, failed replay | Add-only payloads with `schema_version` per type, upcasters applied on read during replay, round-trip tests, and a rule that a fold tolerates unknown added fields but never guesses at changed meaning |
 | `target/` grows unbounded / bloats CI caches | Disk exhaustion, cache eviction | size-aware profiles, `size-budget.toml`, `size-report --check` gate, `prune-target.sh`, separate coverage/dist target dirs |
@@ -1988,7 +2241,7 @@ the public test kit so users can reproduce agent behaviour without spending toke
 10. `feat(provider): models list, doctor probe, retry/backoff`
 11. `feat(provider): System One (Jev) decision client, typed validation, cost conversion (+ fixtures)`
 12. `feat(engine): tool runtime — containment, SSRF/proxy policy, process groups (+ adversarial tests)`
-13. `feat(engine): effect runner (at-least-once, idempotent, backoff deadlines), event-sourced run lifecycle, decisions projection, workspace lifecycle, cost accounting, CrashRecovered (+ idempotency tests)`
+13. `feat(engine): effect runner (at-least-once, idempotent, backoff deadlines), event-sourced run lifecycle, `EstimateTask` heuristic effect, decisions projection, workspace lifecycle, cost accounting, CrashRecovered (+ idempotency tests)`
 14. `feat(engine): agent loop as a step machine over events, budgets + estimation, loop detector, result envelope`
 15. `feat(engine): decide tool, approvals (hash-bound, deadline expiry), retries as new run streams, headless run + approval/decision CLI (+ e2e)`
 16. `feat(engine): multi-root catalogue discovery — .opencode/agents + .agents/agents + .agents/*.md + globals, black-box skill dirs, SKILL.md parsing, skill:<id> stream + skills projection, trust gates for both kinds (+ fixtures incl. the references/ regression)`
@@ -2004,6 +2257,15 @@ the public test kit so users can reproduce agent behaviour without spending toke
 26. `feat(tui): event log overlay (E) with causation chain and projection lag in the status line`
 
 27. `feat(engine): compensating commands for undo (`mta task undo`) once the log is live (post-v0.1)`
+28. `feat(cli): diagnostics baseline — tracing subscriber, console + rotating file sinks, directive/`RUST_LOG` parser, `Secret` redaction + no-secret property test, panic-hook crash marker, mta-testkit log capture, `doctor --logs` (M0, [observability.md](observability.md))`
+29. `feat(domain,tui): task estimation — heuristic estimator + `estimator_version`, `TaskEstimated`/`TaskEffortRecorded` events, `EstimateTask`/`SetTaskEstimate`/`ClearTaskEstimate`/`RecordTaskEffort` commands, `tasks` columns, card/column/header totals (+ property, golden, snapshot tests)` (M2)
+30. `feat(tui): estimate editor (auto/pin/clear), actual-effort capture on accept, `T` forecast overlay with calibration and unestimated lists, pointer parity (+ snapshots)` (M6)
+31. `feat(engine,cli): estimate calibration from actuals and run terminals, throughput + projected finish, Jev `task_estimate` refinement, `mta estimate`/`mta task estimate|actual`/`doctor --estimate` (+ fixtures)` (M7)
+
+Item 28 was added after this list was first cut, so it is numbered last to keep the numbers stable even
+though it is M0 work: it is the diagnostics half of the bootstrap, and item 1's workspace/CI frame is
+where it lands. Items 29–31 keep the same append-only numbering for the estimation feature; they land in
+M2, M6, and M7 respectively, in the order above.
 **Definition of done (v0.1)**
 
 - [ ] All §1.1 goals demonstrated by the demo script; no P0/P1 bugs open.
@@ -2024,6 +2286,10 @@ the public test kit so users can reproduce agent behaviour without spending toke
       run.
 - [ ] `mta events show <id>` explains a card's current state through its correlation/causation chain,
       and the TUI `E` overlay shows the same stream with projection lag in the status line.
+- [ ] A failing run is diagnosable from the file log alone: its records carry the `run_id`/`command_id`
+      that join them to `events`, retry attempts and durations are visible, no configured secret appears
+      at any level (property test), the TUI wrote nothing to the terminal, and `mta doctor --logs` reports
+      the resolved level, directives, sinks, and usage against the rotation caps.
 - [ ] `cargo test` green on linux + macOS; clippy/deny clean; snapshot tests committed.
 - [ ] `scripts/size-report.sh --check` passes; `target/` and the release binary are within the
       committed budgets, and a deliberate budget change is documented.
@@ -2039,6 +2305,10 @@ the public test kit so users can reproduce agent behaviour without spending toke
       detail; a stalled sampler degrades to `stale` rather than blanking the widget; no host sample ever
       appears in the event log (`observe_pressure` off by default), and `mta doctor --host` agrees with
       the overlay.
+- [ ] Every open card shows an effort estimate (or an explicit `?`); the header and column totals match
+      `mta estimate`; a manual pin survives edits and auto re-estimation, and clearing it returns the card
+      to automatic control; `T` shows throughput and a projected finish only when the history supports it;
+      `mta replay --dry-run` reproduces every estimate without invoking the estimator or Jev.
 - [ ] DB migration from empty and from every previously released tag passes (no prior tag exists at
       v0.1; the rule starts with v0.1.1).
 - [ ] Security review of tool policies, secret handling, and injection tests signed off.
@@ -2104,6 +2374,46 @@ disk_warn_pct = 90
 # mounts auto-detected: real filesystems only (tmpfs/devtmpfs/overlay/efivarfs excluded)
 observe_pressure = false            # true: log a debounced HostPressureObserved crossing
 observe_pressure_cooldown_s = 300   # rising-edge only — an audit breadcrumb, not a poll
+
+[estimation]                        # auto effort + run forecast (PLAN.md §3.3, ADR-0012)
+enabled = true
+default_minutes = 60                # starting point when no signal exists
+min_minutes = 15
+max_minutes = 480                   # a card bigger than a day should be split
+round_to_minutes = 15
+workday_hours = 8                   # display only: 8h renders as 1d
+tag_minutes = { code = 120, docs = 60, research = 90, admin = 30, review = 45, bug = 120, ops = 60 }
+priority_multiplier = { "1" = 1.2, "2" = 1.0, "3" = 0.9 }
+dependency_bonus_pct = 10           # per dependency, capped at 50%
+description_step_chars = 400        # each `description_step_chars` adds `description_step_minutes`
+description_step_minutes = 15
+description_max_steps = 4
+learn_from_actuals = true           # calibrate effort from TaskEffortRecorded, never from elapsed time
+throughput_window_days = 14
+throughput_min_days = 3             # fewer days ⇒ "insufficient history", no projected finish
+forecast = true                     # run duration/cost forecast when an agent + history exist
+refine_with_decision = true         # one Jev score question for vague/uncertain cards
+refine_below_confidence = 0.55
+# The EWMA alpha, ratio clamp, and size buckets are fixed constants in the estimator, not config:
+# changing config must not change a projection rebuild (ADR-0012).
+
+[logging]                           # diagnostics only — never the audit trail (observability.md, ADR-0011)
+level = "info"                      # error | warn | info | debug | trace | off
+directives = []                     # per-target overrides, e.g. ["mta_engine::effects=debug", "hyper=warn"]
+format = "human"                    # human | json
+ansi = "auto"                       # auto | always | never
+console = true                      # stderr sink; auto-disabled while the TUI owns the screen
+file = true                         # rotating file sink (forced on in TUI mode)
+dir = ""                            # default $XDG_STATE_HOME/mta/logs
+rotate = "daily"                    # daily | hourly | never
+retain_files = 7                    # files kept per rotation series
+max_file_mb = 16                    # rotate early rather than grow past this
+max_total_mb = 128                  # hard cap; oldest files pruned beyond it (with a warn)
+ring_lines = 2000                   # buffer feeding the O overlay; never persisted
+log_prompts = false                 # include prompt/response text (off by default)
+log_tool_output = false             # include tool stdout/stderr bodies
+max_field_bytes = 2048              # truncate any recorded field
+dedup_window_ms = 1000              # collapse identical repeated records into a count
 
 [storage]
 db = "~/.local/share/mta/mta.db"   # default; --db overrides
