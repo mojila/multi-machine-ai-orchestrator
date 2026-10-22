@@ -1,0 +1,16 @@
+[package]
+name = "mta-engine"
+description = "Command processor, effects, scheduler, and run executor for mta"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+mta-domain.workspace = true
+mta-store.workspace = true
+
+[lints]
+workspace = true

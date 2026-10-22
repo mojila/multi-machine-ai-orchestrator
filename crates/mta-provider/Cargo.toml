@@ -1,0 +1,15 @@
+[package]
+name = "mta-provider"
+description = "OpenAI-compatible chat and System One (Jev) decision clients for mta"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+mta-domain.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,6 @@
+# Pinned deliberately (ADR-0002): `channel = "stable"` would silently pick a toolchain older
+# than sqlx 0.9 requires on some CI images and fail late.
+[toolchain]
+channel = "1.94"
+components = ["clippy", "rustfmt"]
+profile = "minimal"
