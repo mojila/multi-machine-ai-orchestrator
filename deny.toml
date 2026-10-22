@@ -1,0 +1,60 @@
+# cargo-deny configuration. Enforced by `cargo deny check` in CI; see docs/build.md
+# and ADR-0002.
+#
+# Every skip below is a deliberate, documented exception. Do not add one without
+# a comment explaining why the duplicate cannot be removed and how it will be.
+
+[graph]
+all-features = true
+
+[advisories]
+version = 2
+# A yanked release is not automatically vulnerable, but it is unpinned rot; a
+# yanked crate must be replaced, not tolerated.
+yanked = "deny"
+ignore = []
+
+[licenses]
+version = 2
+# The workspace ships under MIT OR Apache-2.0 (see Cargo.toml). Every dependency
+# must offer one of these, or a permissive licence from the same family. Licences
+# outside this list are a decision, not an accident: add one here with a reason.
+allow = [
+  "MIT",
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "Zlib",
+  "Unicode-3.0",
+  "MPL-2.0",
+  "BSL-1.0",
+  "Unlicense",
+]
+confidence-threshold = 0.9
+
+[bans]
+# Duplicate crate versions are a size and maintenance bug (docs/build.md §1).
+multiple-versions = "deny"
+# A `*` dependency makes the committed lockfile meaningless.
+wildcards = "deny"
+highlight = "all"
+
+[[bans.skip]]
+# syn 2.x is still required by proc-macro derives (derive_more via crossterm,
+# strum_macros via ratatui-core, tracing-attributes) while syn 3.x is required by
+# clap_derive/darling/instability. There is no version of either ecosystem that
+# unifies them yet, and the two are build-time only. Re-check when crossterm and
+# ratatui release syn 3.x-compatible derives.
+name = "syn"
+version = "2.0.119"
+
+# Note: the bans graph covers normal and build dependencies, not dev-dependencies,
+# so a duplicate that exists only under `[dev-dependencies]` (currently cpufeatures
+# 0.2 via sha2 vs 0.3 via proptest) is not reported here. It is dev-only and never
+# links into the shipped binary; `cargo tree -d` in CI still lists it, and the
+# terminal-crate grep fails on a duplicate crossterm/ratatui regardless of kind.
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

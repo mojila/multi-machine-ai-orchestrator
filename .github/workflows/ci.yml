@@ -1,0 +1,128 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# One in-flight run per ref; pushes to main still verify, PR pushes cancel.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  # Incremental caches are the largest and least useful part of target/ in CI.
+  CARGO_INCREMENTAL: "0"
+  RUST_BACKTRACE: "1"
+
+jobs:
+  fmt:
+    name: fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.94"
+          components: rustfmt
+      - run: cargo fmt --all --check
+      - name: docs formatting
+        # Markdown/YAML changes are not covered by rustfmt; at least keep the
+        # config files parseable.
+        run: |
+          python3 - <<'PY'
+          import tomllib, pathlib
+          for name in ("Cargo.toml", "size-budget.toml", "deny.toml"):
+              tomllib.loads(pathlib.Path(name).read_text())
+          PY
+
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.94"
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: test-${{ matrix.os }}
+      - name: clippy
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - name: test
+        run: cargo test --workspace --all-features
+        env:
+          # Snapshots never auto-update in CI ([docs/build.md]).
+          INSTA_UPDATE: "no"
+
+  # Dependency and supply-chain policy. Separate job so a deny failure is not
+  # buried in a long test log.
+  policy:
+    name: policy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.94"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: policy
+      - name: cargo-deny
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+          arguments: --all-features
+      - name: cargo-audit
+        uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - name: duplicate terminal crates
+        # cargo-deny already bans duplicates, but a duplicate crossterm or
+        # ratatui is worse than wasted space: two terminal states fighting over
+        # one tty. Fail loudly and separately ([docs/build.md] §1/§4).
+        run: |
+          cargo tree -d --workspace --all-features > duplicates.txt || true
+          if grep -Eq '^(crossterm|ratatui|ratatui-core|ratatui-crossterm) v' duplicates.txt; then
+            echo "duplicate terminal crate detected:"
+            grep -E '^(crossterm|ratatui|ratatui-core|ratatui-crossterm) v' duplicates.txt
+            exit 1
+          fi
+          echo "no duplicate terminal crates"
+      - name: mta-domain purity
+        # mta-domain is the deterministic core and must not link I/O or
+        # telemetry crates ([ADR-0009], AGENTS.md §4). The allowlist is the
+        # crates we knowingly accept; anything else fails review here.
+        run: |
+          cargo tree -p mta-domain --edges normal --prefix none --no-dedupe \
+            | sed -E 's/^[^a-zA-Z0-9_-]*//; s/ v.*//' | sort -u > domain-tree.txt
+          cat domain-tree.txt
+          forbidden='^(tokio|tokio-util|reqwest|hyper|sqlx|tracing|tracing-subscriber|tracing-appender|log|mio|rustls|ureq|async-std|axum|tonic|mta-store|mta-cli|mta-tui|mta-engine|mta-provider)$'
+          if grep -Eq "$forbidden" domain-tree.txt; then
+            echo "mta-domain depends on a forbidden crate:"
+            grep -E "$forbidden" domain-tree.txt
+            exit 1
+          fi
+          echo "mta-domain is pure"
+
+  size:
+    name: size
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.94"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: size
+      - name: release build
+        run: cargo build --release --workspace
+      - name: binary size budget
+        run: scripts/size-report.sh --check
