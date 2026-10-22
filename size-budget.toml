@@ -1,8 +1,11 @@
 # Budgets for build artifacts and the shipped binary.
 # Enforced by scripts/size-report.sh --check in CI. See docs/build.md.
 #
-# Values are MiB. These are placeholders with headroom — calibrate them in M1
-# once the workspace builds for real, then tighten in M6 before v0.1.
+# Values are MiB. They were calibrated in M0 against the first real build of this
+# workspace (release binary 2.3 MiB, target/ 932 MiB after a dev + all-targets +
+# release build) and leave headroom for the M1 stack — tokio, reqwest/rustls,
+# sqlx/sqlite, the event store, and the real TUI. Tighten again in M6 before v0.1
+# once the binary carries its real feature set; never raise one silently.
 #
 # The shipped binary budget covers `mta` only: `mta-testkit` is a dev-only member
 # (log capture for tests) and never links into it, so it is out of scope here.
@@ -15,14 +18,14 @@
 
 [target]
 # Whole `target/` directory after a normal dev + test + release build.
-total_mb = 4096
+total_mb = 3072
 # `target/debug` (our crates + deps + test binaries).
-dev_mb = 2500
+dev_mb = 1600
 # `target/release`.
-release_mb = 900
+release_mb = 600
 # `target/debug/incremental` — the first thing to prune, and never cached in CI.
-incremental_mb = 1200
+incremental_mb = 800
 
 [binaries]
 # Stripped `target/release/mta` (debug info stripped, symbols kept).
-release_mta_mb = 30
+release_mta_mb = 20

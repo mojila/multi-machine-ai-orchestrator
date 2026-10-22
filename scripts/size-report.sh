@@ -45,7 +45,7 @@ printf 'total:            %s MiB' "$total"
 printf '\n\n'
 
 echo "sections:"
-for dir in debug release doc incremental nextest llvm-cov-target cov dist distrib; do
+for dir in debug debug/incremental release doc nextest llvm-cov-target cov dist distrib; do
   if [ -d "$TARGET/$dir" ]; then
     printf '  %-18s %6s MiB\n' "$dir" "$(mib "$TARGET/$dir")"
   fi
@@ -80,6 +80,21 @@ if [ -n "$b_bin" ] && [ -f "$TARGET/release/mta" ]; then
   size="$(mib "$TARGET/release/mta")"
   [ "$size" -gt "$b_bin" ] && over+=("release binary ${size} MiB > ${b_bin} MiB")
 fi
+# Section budgets are published in size-budget.toml, so they are enforced too.
+check_section() {
+  local dir="$1" key="$2" budget_mib size_mib
+  budget_mib="$(budget "$key")"
+  [ -n "$budget_mib" ] || return 0
+  [ -d "$TARGET/$dir" ] || return 0
+  size_mib="$(mib "$TARGET/$dir")"
+  if [ "$size_mib" -gt "$budget_mib" ]; then
+    over+=("$dir ${size_mib} MiB > ${budget_mib} MiB")
+  fi
+  return 0
+}
+check_section debug dev_mb
+check_section release release_mb
+check_section debug/incremental incremental_mb
 
 echo
 if [ "${#over[@]}" -eq 0 ]; then
