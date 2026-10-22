@@ -4,6 +4,8 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Allow a build-status check on demand from the Actions tab or `gh workflow run`.
+  workflow_dispatch:
 
 # One in-flight run per ref; pushes to main still verify, PR pushes cancel.
 concurrency:
@@ -80,9 +82,15 @@ jobs:
           command: check
           arguments: --all-features
       - name: cargo-audit
-        uses: rustsec/audit-check@v2
+        # Pin the tool: the newest cargo-audit pulls dependencies that require a
+        # newer rustc than our pinned 1.94 (ADR-0002). install-action fetches a
+        # prebuilt binary, so audit has its own toolchain and never changes the
+        # project's MSRV. Bump both together.
+        uses: taiki-e/install-action@v2
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+          tool: cargo-audit@0.22.2
+      - name: cargo audit
+        run: cargo audit
       - name: duplicate terminal crates
         # cargo-deny already bans duplicates, but a duplicate crossterm or
         # ratatui is worse than wasted space: two terminal states fighting over

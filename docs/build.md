@@ -110,7 +110,10 @@ Rules of thumb:
   size one.
 - The policy job also runs `cargo-audit`, the duplicate-terminal gate, and `cargo tree -p mta-domain`
   checked against a forbidden-crate list (`tokio`, `tracing`, `sqlx`, `reqwest`, …), so the purity rule
-  in AGENTS.md §4 is enforced by CI and not only by review.
+  in AGENTS.md §4 is enforced by CI and not only by review. `cargo-audit` is installed from a **pinned
+  prebuilt release** (`cargo-audit@0.22.2`): the tool's own dependency tree can require a newer rustc
+  than the project's MSRV, and that must never force a toolchain bump. Bump the pin deliberately and
+  verify the advisory database still covers the lockfile.
 
 ## 5. Binary size budget
 

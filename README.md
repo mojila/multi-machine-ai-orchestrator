@@ -1,5 +1,7 @@
 # multi-machine-ai-orchestrator (`mta`)
 
+[![CI](https://github.com/mojila/multi-machine-ai-orchestrator/actions/workflows/ci.yml/badge.svg)](https://github.com/mojila/multi-machine-ai-orchestrator/actions/workflows/ci.yml)
+
 Terminal-first AI agent orchestrator: a Kanban board where day-to-day employee tasks are assigned to
 configurable agents, executed against any OpenAI-compatible provider, and reviewed by a human.
 

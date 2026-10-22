@@ -1,7 +1,9 @@
 //! End-to-end CLI tests: `--version`, `config`, `doctor`, and exit codes.
 //!
-//! Every command runs in a sandbox with its own XDG directories, so tests never touch the
-//! developer's real config, state, or logs.
+//! Every command runs in a sandbox with its own home directory (and XDG overrides on Linux), so
+//! tests never touch the developer's real config, state, or logs. Expected paths are computed per
+//! platform because `directories::ProjectDirs` uses native locations: XDG on Linux and
+//! `~/Library/Application Support` on macOS, where the XDG variables are ignored.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -35,12 +37,30 @@ impl Sandbox {
         self.command().args(args).output().expect("run mta")
     }
 
+    fn config_dir(&self) -> PathBuf {
+        if cfg!(target_os = "macos") {
+            self.dir.path().join("home/Library/Application Support/mta")
+        } else {
+            self.dir.path().join("config/mta")
+        }
+    }
+
+    fn state_dir(&self) -> PathBuf {
+        if cfg!(target_os = "macos") {
+            // `ProjectDirs::state_dir()` is `None` on macOS; the CLI falls back to
+            // `<config_dir>/state`.
+            self.config_dir().join("state")
+        } else {
+            self.dir.path().join("state/mta")
+        }
+    }
+
     fn config_file(&self) -> PathBuf {
-        self.dir.path().join("config/mta/config.toml")
+        self.config_dir().join("config.toml")
     }
 
     fn log_dir(&self) -> PathBuf {
-        self.dir.path().join("state/mta/logs")
+        self.state_dir().join("logs")
     }
 }
 
