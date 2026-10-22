@@ -1,6 +1,6 @@
 # ADR-0007: Pre-flight rolling context compaction with a calibrated estimator
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-10-21
 - **Deciders:** project owner
 - **Related:** [PLAN.md §3.6.2](../PLAN.md#362-context-assembly-and-auto-compaction),

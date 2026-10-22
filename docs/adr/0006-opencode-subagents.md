@@ -1,6 +1,6 @@
 # ADR-0006: Reuse OpenCode agent definitions as the sub-agent roster
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-10-21
 - **Deciders:** project owner
 - **Related:** [docs/agents.md](../agents.md),

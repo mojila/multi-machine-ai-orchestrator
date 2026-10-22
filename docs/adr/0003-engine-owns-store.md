@@ -1,6 +1,6 @@
 # ADR-0003: Engine owns the store; TUI consumes view models over events
 
-- **Status:** Proposed — **amended by [ADR-0009](0009-event-sourced-core.md)**: the append-only event log,
+- **Status:** Accepted — **amended by [ADR-0009](0009-event-sourced-core.md)**: the append-only event log,
   not the SQLite business tables, is the source of truth (tables are rebuildable projections). The rules
   that the engine owns the store, that the TUI never touches the database, and that the UI consumes view
   models over events all stand and are strengthened by ADR-0009.

@@ -1,6 +1,6 @@
 # ADR-0011: Structured diagnostics with `tracing`, kept separate from the event log
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-10-21
 - **Deciders:** project owner
 - **Related:** [docs/observability.md](../observability.md), [docs/events.md](../events.md),

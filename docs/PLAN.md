@@ -1869,12 +1869,14 @@ build output as a **budgeted resource**, not an unlimited cache. Full rationale 
   `[profile.release] debug = 0, strip = "debuginfo", lto = "thin", codegen-units = 1`.
   `panic = "abort"` is rejected: it breaks the test harness and weakens terminal-restore-on-panic.
 - **Budgets:** `size-budget.toml` holds MiB limits for total `target/`, dev/release/incremental, and
-  the stripped `mta` binary. Numbers are placeholders until M1's first build, then calibrated.
+  the stripped `mta` binary. Calibrated in M0 against the first real build (2.3 MiB binary, 932 MiB
+  `target/`) and re-tightened in M6 with a measured full-feature binary.
 - **Enforcement:** `scripts/size-report.sh --check` fails CI on breach and prints the top consumers;
   `scripts/prune-target.sh [--aggressive]` reclaims space safely. `target/`, coverage (`target/cov`),
   and distribution (`target/dist`) use separate target dirs so the dev cache stays lean.
-- **Hygiene:** `CARGO_INCREMENTAL=0` in CI; `cargo tree -d` stays a hard gate (duplicate crate
-  versions are both a maintenance and a size bug); `cargo vendor` is never committed; a global
+- **Hygiene:** `CARGO_INCREMENTAL=0` in CI; duplicate crate versions stay a hard gate (`cargo-deny`
+  `multiple-versions = "deny"` with commented skips, plus a CI grep that fails on a duplicate terminal
+  crate); `cargo vendor` is never committed; a global
   `target-dir` is never pinned in `.cargo/config.toml`.
 - **Binary discipline:** trimmed `reqwest`/`tokio`/`clap`/`tracing` features, one version per crate via
   `[workspace.dependencies]`, and `cargo bloat --release --crates` as the diagnostic before any budget

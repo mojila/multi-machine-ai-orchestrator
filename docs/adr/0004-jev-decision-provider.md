@@ -1,6 +1,6 @@
 # ADR-0004: Jev is a first-class decision provider, not a chat provider
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-10-21
 - **Deciders:** project owner
 - **Related:** [PLAN.md §3.5.1](../PLAN.md#351-decision-provider--jev--system-one),

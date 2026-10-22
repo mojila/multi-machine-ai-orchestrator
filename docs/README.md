@@ -53,4 +53,5 @@ orchestrator with a Kanban TUI.
 | `docs/contributing.md` — dev setup, testing, snapshot workflow | M8 |
 | `docs/demo.md` — fresh-install walkthrough and asciinema script | M8 |
 
-**Status:** planning stage — no code exists yet; see [PLAN.md §5](PLAN.md#5-milestones).
+**Status:** M0 (bootstrap) complete; the event store, board, and TUI shell start in M1/M2. See
+[PLAN.md §5](PLAN.md#5-milestones).

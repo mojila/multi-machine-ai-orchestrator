@@ -1,6 +1,6 @@
 # ADR-0008: Pointer input via a render-time hit map, with strict keyboard parity
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-10-21
 - **Deciders:** project owner
 - **Related:** [PLAN.md §2.3 TUI specification](../PLAN.md#23-tui-specification),

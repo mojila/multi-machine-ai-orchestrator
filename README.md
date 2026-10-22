@@ -3,8 +3,9 @@
 Terminal-first AI agent orchestrator: a Kanban board where day-to-day employee tasks are assigned to
 configurable agents, executed against any OpenAI-compatible provider, and reviewed by a human.
 
-**Status:** planning stage — no code yet. The full implementation plan is in
-**[docs/PLAN.md](docs/PLAN.md)**.
+**Status:** M0 (bootstrap) complete — the workspace, the `mta` CLI surface (`--version`, `doctor`,
+`config`), the diagnostics baseline, and a minimal TUI exist and are covered by tests and CI. The event
+store and the board land in M1. The full implementation plan is in **[docs/PLAN.md](docs/PLAN.md)**.
 
 ## Documentation
 
@@ -78,6 +79,26 @@ so a convenient picker never becomes a run against an invented price. The choice
 Multi-machine execution (daemon + workers) is deliberately deferred to v0.2;
 replicating the event log is the intended protocol, and the crate boundaries are designed for it.
 
+## Build and run
+
+`rust-toolchain.toml` pins the toolchain (1.94) and the lockfile is committed, so:
+
+```sh
+cargo build --release
+./target/release/mta --version
+./target/release/mta doctor --logs   # config path, resolved logging, log files, crash markers
+./target/release/mta config init     # write the commented default config (refuses to clobber)
+./target/release/mta                 # TUI; `q` or Ctrl-C quits
+```
+
+Verification is the CI gate in [AGENTS.md](AGENTS.md) §7: `cargo fmt --check`,
+`cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`, `cargo deny check`,
+`cargo audit`, `cargo tree -p mta-domain` (purity), and `scripts/size-report.sh --check`.
+
+## License
+
+Dual-licensed under either [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at your option.
+
 ## Next step
 
-Milestone M0 (bootstrap) per [PLAN.md §5](docs/PLAN.md#5-milestones).
+Milestone M1 (domain + event store) per [PLAN.md §5](docs/PLAN.md#5-milestones).

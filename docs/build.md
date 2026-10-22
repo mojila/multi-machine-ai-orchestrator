@@ -17,7 +17,7 @@ in [`size-budget.toml`](../size-budget.toml) and are checked by
 | Our crates' debug info | hundreds of MB | full DWARF for our own code | `[profile.dev] debug = "line-tables-only"` (keeps useful backtraces) |
 | `target/debug/incremental` | 0.5–3 GB | incremental caches for every changed crate, never collected | `CARGO_INCREMENTAL=0` in CI; periodic `rm -rf target/debug/incremental` locally |
 | Test binaries | hundreds of MB | `unittest` + integration + doc tests per crate | line-tables-only debug, single shared test profile |
-| Duplicate dependency versions | hundreds of MB | two semver-major versions of the same crate coexist silently | `cargo tree -d` gate in CI ([ADR-0002](adr/0002-version-pinning.md)) |
+| Duplicate dependency versions | hundreds of MB | two semver-major versions of the same crate coexist silently | `cargo-deny` `multiple-versions = "deny"` plus the terminal-crate grep in CI ([ADR-0002](adr/0002-version-pinning.md), `deny.toml`) |
 | Extra profiles/dirs | 0.2–2 GB each | `release`, `doc`, `target/nextest`, `target/llvm-cov-target`, `target/insta` | `cargo clean --profile …`; coverage/dist get their own target dir; `target/insta` only after reviewing pending snapshots |
 | Cross-compilation | 0.5–2 GB per triple | `cargo-dist` linux/macOS/Windows/aarch64 outputs | per-CI-job `CARGO_TARGET_DIR`, never accumulate locally |
 | Stale artifacts from removed deps | grows forever | cargo only cleans what it rebuilds | `cargo sweep --time 7d` (optional tool) or `cargo clean` |
@@ -97,15 +97,41 @@ Rules of thumb:
   than the lockfile-keyed target (cache keys include `Cargo.lock` so stale artifacts age out).
 - One job runs `scripts/size-report.sh --check` on merge to `main`; a breach fails the job with the
   top consumers printed. Growth trend is optional (see §6).
+- `.github/workflows/ci.yml` has four jobs: `fmt` (rustfmt plus a TOML parse of the committed
+  manifests), `test` on `ubuntu-latest` and `macos-latest` (clippy `-D warnings` + tests, snapshots
+  never auto-updated), `policy` (deny, audit, duplicate terminal crates, `mta-domain` purity) and `size`
+  (release build + `size-report.sh --check`).
 - Release/dist jobs set their own `CARGO_TARGET_DIR` per triple and upload only the binary; runner
   storage is ephemeral anyway.
-- `cargo tree -d` stays a hard gate (duplicate crate versions are both a maintenance and a size bug).
+- Duplicate crate versions stay a hard gate: `cargo-deny` runs with `multiple-versions = "deny"` and
+  every skip in `deny.toml` carries a comment naming the crate that forces the duplicate and when to
+  re-check. On top of that, a separate grep over `cargo tree -d` fails on a duplicated **terminal**
+  crate (`crossterm`, `ratatui*`) — two terminal stacks in one process is a correctness bug, not only a
+  size one.
+- The policy job also runs `cargo-audit`, the duplicate-terminal gate, and `cargo tree -p mta-domain`
+  checked against a forbidden-crate list (`tokio`, `tracing`, `sqlx`, `reqwest`, …), so the purity rule
+  in AGENTS.md §4 is enforced by CI and not only by review.
 
 ## 5. Binary size budget
 
 `--release` with the profiles above, stripped, should land in the low tens of MiB for this stack
 (tokio + reqwest/rustls + sqlx/sqlite + ratatui + clap). The committed budget in `size-budget.toml`
-starts generous and gets tightened once M1/M6 measure a real binary.
+was calibrated against the first real build in M0 (2026-10-22):
+
+| Artifact | Measured | Budget |
+|---|---|---|
+| `target/` after dev + all-targets + release | 932 MiB | 3072 MiB |
+| `target/debug` | 710 MiB | 1600 MiB |
+| `target/debug/incremental` | 248 MiB | 800 MiB |
+| `target/release` | 223 MiB | 600 MiB |
+| `target/release/mta` (2,420,376 bytes) | 2.3 MiB | 20 MiB |
+
+The M0 binary is the floor, not the target: it carries clap, `tracing` + the file sink, `directories`,
+`serde`, `sha2`, and ratatui/crossterm, but none of the M1–M6 dependencies (tokio, `reqwest`/rustls,
+`sqlx`/sqlite, `toml_edit`). The 20 MiB ceiling is the "low tens of MiB" claim in
+[PLAN.md §3.11](PLAN.md#311-bounded-build-artifacts-and-binary-size) made enforceable; M6 re-tightens it
+with a measured binary.
+`scripts/size-report.sh --check` enforces the total, the three section budgets, and the binary.
 
 Rules:
 
@@ -135,8 +161,9 @@ Rules:
 
 ## 6. Guardrails and escalation
 
-1. `scripts/size-report.sh --check` fails CI when `target/` total or the release binary exceeds
-   `size-budget.toml`. Budget changes are a reviewed commit with a one-line reason.
+1. `scripts/size-report.sh --check` fails CI when the `target/` total, a published section (dev,
+   release, debug/incremental), or the release binary exceeds `size-budget.toml`. Budget changes are a
+   reviewed commit with a one-line reason.
 2. Raising a budget is allowed only with: the measured size, the top three consumers, and a mitigation
    attempted (profile change, feature trim, clean-up command). No silent raises.
 3. Optional trend: append `date,total_mb,release_mb` to `docs/reports/build-size.tsv` from the CI size

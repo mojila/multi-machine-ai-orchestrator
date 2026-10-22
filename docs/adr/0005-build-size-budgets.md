@@ -1,6 +1,6 @@
 # ADR-0005: Build artifacts and binary size are budgeted, not unbounded
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-10-21
 - **Deciders:** project owner
 - **Related:** [docs/build.md](../build.md), [size-budget.toml](../../size-budget.toml),

@@ -1,6 +1,6 @@
 # ADR-0009: Event-sourced core — the append-only log is the source of truth
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-10-21
 - **Deciders:** project owner
 - **Related:** [ADR-0003 engine owns store](0003-engine-owns-store.md),

@@ -1,6 +1,6 @@
 # ADR-0002: Pin MSRV 1.94 and exact pre-1.0 ratatui crates
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-10-21
 - **Deciders:** project owner
 - **Related:** [PLAN.md §3.2](../PLAN.md#32-workspace-layout),

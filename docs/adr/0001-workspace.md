@@ -1,6 +1,6 @@
 # ADR-0001: Cargo workspace with layered crates
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-10-21
 - **Deciders:** project owner
 - **Related:** [PLAN.md §3.2](../PLAN.md#32-workspace-layout)
